@@ -66,6 +66,16 @@ notifier.api = realBot.api;
 const http = createServer(cfg, monitor, notifier, updateMain);
 broadcast = http.broadcast;
 
+http.server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    console.error(`Port ${cfg.port} on ${cfg.host} is already in use. Choose another PORT in .env (npm run setup), then update the aaPanel config (npm run nginx).`);
+  } else if (e.code === "EACCES") {
+    console.error(`No permission to use port ${cfg.port}. Use a port above 1024.`);
+  } else {
+    console.error(e);
+  }
+  process.exit(1);
+});
 http.server.listen(cfg.port, cfg.host, () => {
   console.log(`Watchdog main server listening on http://${cfg.host}:${cfg.port}`);
   console.log(`Sub servers connect to: ${cfg.publicUrl || "(set PUBLIC_URL)"}`);

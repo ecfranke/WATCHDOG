@@ -5,8 +5,9 @@ services:
     env_file: .env
     environment:
       DATA_FILE: /data/watchdog.json
+      HOST: 0.0.0.0            # inside the container; published only on 127.0.0.1 below
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"   # aaPanel/nginx proxies to this port
     volumes:
       - watchdog-data:/data
 

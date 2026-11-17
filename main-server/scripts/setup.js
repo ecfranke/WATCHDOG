@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+// Interactive setup for the main server: writes .env and the nginx config for aaPanel.
+//
+//   npm run setup
+//
+// Re-run any time to change the port, domain or bot settings; current values are the defaults.
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
+import { buildNginx, writeNginxFile } from "./nginx.js";
+
+const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ENV_FILE = path.join(APP_DIR, ".env");
+const EXAMPLE = path.join(APP_DIR, ".env.example");
+
+const current = fs.existsSync(ENV_FILE) ? dotenv.parse(fs.readFileSync(ENV_FILE)) : {};
+// Queue input lines so this works both interactively and with piped answers.
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+const lines = [];
+let waiting = null;
+let ended = false;
+rl.on("line", (l) => (waiting ? (waiting(l), (waiting = null)) : lines.push(l)));
+rl.on("close", () => {
+  ended = true;
+  waiting?.(null);
+});
+const nextLine = () =>
+  lines.length ? Promise.resolve(lines.shift()) : ended ? Promise.resolve(null) : new Promise((r) => (waiting = r));
+
+async function ask(question, def = "", validate = () => null) {
+  for (;;) {
+    const shown = def ? ` [${def}]` : "";
+    process.stdout.write(`${question}${shown}: `);
+    const line = await nextLine();
+    if (line === null) {
+      console.log("\nInput ended; nothing saved.");
+      process.exit(1);
+    }
+    if (!process.stdin.isTTY) console.log(line);
+    const answer = line.trim() || def;
+    const problem = validate(answer);
+    if (!problem) return answer;
+    console.log(`  ✖ ${problem}`);
+  }
+}
+
+function portFree(port, host) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port, host);
+  });
+}
+
+async function nextFreePort(start, host) {
+  for (let p = start; p < start + 200 && p <= 65535; p++) if (await portFree(p, host)) return p;
+  return null;
+}
+
+/** Set KEY=value in the .env text, keeping comments and other keys. */
+function setKey(text, key, value) {
+  const line = `${key}=${value}`;
+  const re = new RegExp(`^#?\\s*${key}=.*$`, "m");
+  return re.test(text) ? text.replace(re, line) : `${text.trimEnd()}\n${line}\n`;
+}
+
+function hostFromUrl(u) {
+  try {
+    return new URL(u).host;
+  } catch {
+    return "";
+  }
+}
+
+console.log("\n🐕 Watchdog main server setup\n");
+
+const botToken = await ask("Telegram bot token (from @BotFather)", current.BOT_TOKEN || "", (v) =>
+  /^\d+:[\w-]{30,}$/.test(v) ? null : "looks wrong — it should look like 123456789:AA…",
+);
+const adminIds = await ask("Admin Telegram user IDs (comma separated; unknown? use 0 and send /start to the bot later)", current.ADMIN_IDS || "", (v) =>
+  /^\s*-?\d+(\s*[,;\s]\s*-?\d+)*\s*$/.test(v) ? null : "numbers only, e.g. 111111111,222222222",
+);
+
+const domainIn = await ask(
+  "Domain of this main server, as set up in aaPanel (e.g. watchdog.example.com)",
+  hostFromUrl(current.PUBLIC_URL || ""),
+  (v) => (v && !/\s/.test(v) ? null : "enter a domain like watchdog.example.com"),
+);
+
+const behindProxy = /^y/i.test(await ask("Is aaPanel / nginx in front of it (recommended)? y/n", "y"));
+const host = behindProxy ? "127.0.0.1" : "0.0.0.0";
+
+const curPort = Number(current.PORT || 8080);
+const suggested = (await portFree(curPort, host)) ? curPort : await nextFreePort(curPort + 1, host);
+if (suggested !== curPort) console.log(`  Port ${curPort} is in use on this machine; suggesting ${suggested}.`);
+const port = Number(
+  await ask("Local port for the Node app (any free port; aaPanel forwards HTTPS to it)", String(suggested || 8080), (v) => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) return "pick a number between 1024 and 65535";
+    return null;
+  }),
+);
+if (!(await portFree(port, host))) {
+  console.log(`  ⚠ Port ${port} is in use right now. Fine if that's a running Watchdog you're reconfiguring; otherwise pick another.`);
+}
+rl.close();
+
+const publicUrl = /^https?:\/\//.test(domainIn)
+  ? domainIn.replace(/\/+$/, "")
+  : behindProxy ? `https://${domainIn}` : `http://${domainIn}:${port}`;
+
+// ---- write .env
+let text = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, "utf8") : fs.readFileSync(EXAMPLE, "utf8");
+for (const [k, v] of Object.entries({
+  BOT_TOKEN: botToken,
+  ADMIN_IDS: adminIds,
+  PUBLIC_URL: publicUrl,
+  WEBAPP_URL: `${publicUrl}/app/`,
+  HOST: host,
+  PORT: port,
+})) text = setKey(text, k, v);
+fs.writeFileSync(ENV_FILE, text, { mode: 0o600 });
+
+// ---- nginx config
+const conf = buildNginx({ port, publicUrl });
+const confFile = writeNginxFile(conf);
+
+const domain = hostFromUrl(publicUrl);
+console.log(`
+✅ Saved ${path.relative(process.cwd(), ENV_FILE) || ".env"}  (PORT=${port}, HOST=${host}, PUBLIC_URL=${publicUrl})
+✅ Saved ${path.relative(process.cwd(), confFile)}
+${
+  behindProxy
+    ? `
+Next, in aaPanel:
+  1. Website → Add site → domain: ${domain}  (PHP: static, no database)
+  2. That site → SSL → Let's Encrypt → apply, then turn on "Force HTTPS"
+  3. That site → Config → paste the block below inside server { }, right after the line "#SSL-END" → Save
+     (aaPanel tests the config when you save; don't also add a "Reverse proxy" for this site)
+
+${conf}
+  4. Start the main server:  sudo systemctl restart watchdog-main   (or: npm start)
+  5. Check: open ${publicUrl}/healthz → {"ok":true,...}
+
+Port ${port} only listens on 127.0.0.1, so you don't need to open it in the aaPanel firewall.
+Sub servers use MAIN_SERVER_URL=${publicUrl}`
+    : `
+The app will listen on 0.0.0.0:${port}. Open port ${port} in aaPanel → Security (and any cloud firewall).
+Note: the Telegram dashboard needs HTTPS, which you get by putting aaPanel/nginx in front.`
+}
+`);

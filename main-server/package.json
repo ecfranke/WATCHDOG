@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "setup": "node scripts/setup.js",
+    "nginx": "node scripts/nginx.js"
   },
   "engines": {
     "node": ">=18.17"

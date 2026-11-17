@@ -42,7 +42,8 @@ export function loadConfig() {
     alertChatIds: ids("ALERT_CHAT_IDS"),
     webappUrl,
     publicUrl, // what sub servers use as MAIN_SERVER_URL
-    host: str("HOST", "0.0.0.0"),
+    // 127.0.0.1 = only reachable through aaPanel/nginx on the same machine (recommended)
+    host: str("HOST", "127.0.0.1"),
     port: num("PORT", 8080),
     dataFile: str("DATA_FILE", "data/watchdog.json"),
 
@@ -72,6 +73,7 @@ export function loadConfig() {
   cfg.recipients = [...new Set([...cfg.adminIds, ...cfg.alertChatIds])];
 
   const problems = [];
+  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) problems.push(`PORT must be 1-65535 (got ${cfg.port})`);
   if (!cfg.botToken) problems.push("BOT_TOKEN is not set (get one from @BotFather)");
   if (!cfg.adminIds.length) problems.push("ADMIN_IDS is empty (send /start to your bot to see your Telegram ID)");
   if (problems.length) {
