@@ -61,6 +61,12 @@ export function loadConfig() {
     hysteresis: num("ALERT_HYSTERESIS", 5),
 
     devNoAuth: bool("DEV_NO_AUTH", false),
+
+    // auto-update from GitHub (the main server must run from a git clone)
+    autoUpdate: bool("AUTO_UPDATE", true),
+    updateCheckMinutes: num("UPDATE_CHECK_MINUTES", 30),
+    updateBranch: str("UPDATE_BRANCH"),
+    githubToken: str("UPDATE_GITHUB_TOKEN"),
   };
 
   cfg.recipients = [...new Set([...cfg.adminIds, ...cfg.alertChatIds])];

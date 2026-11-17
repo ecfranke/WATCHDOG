@@ -8,7 +8,7 @@ import { validateInitData } from "./telegramAuth.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
-export function createServer(cfg, monitor, notifier) {
+export function createServer(cfg, monitor, notifier, updateMain) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", true);
@@ -43,13 +43,15 @@ export function createServer(cfg, monitor, notifier) {
     history_minutes: cfg.historyMinutes,
     offline_after: cfg.offlineAfter,
     muted_until: notifier.isMuted() ? notifier.mutedUntil() : null,
+    main_version: monitor.updater ? monitor.updater.info() : null,
+    latest_commit: monitor.latestCommit(),
   });
 
   // ---------------------------------------------------------------- sub server API
   app.post("/api/agent/report", agentAuth, (req, res) => {
     if (!req.body || typeof req.body !== "object") return res.status(422).json({ error: "JSON body required" });
-    monitor.handleReport(req.server, req.body);
-    res.json({ ok: true, id: req.server.id, name: req.server.name, interval_hint: 5 });
+    const { update } = monitor.handleReport(req.server, req.body);
+    res.json({ ok: true, id: req.server.id, name: req.server.name, update });
   });
 
   app.post("/api/agent/goodbye", agentAuth, (req, res) => {
@@ -67,7 +69,7 @@ export function createServer(cfg, monitor, notifier) {
   app.post("/api/servers", userAuth, (req, res) => {
     try {
       const { server, token } = monitor.addServer(req.body?.name);
-      res.json({ server: monitor.summary(server), token, env: monitor.envSnippet(token) });
+      res.json({ server: monitor.summary(server), token, env: monitor.envSnippet(token), install: monitor.installCommand(token) });
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
@@ -81,7 +83,20 @@ export function createServer(cfg, monitor, notifier) {
   app.post("/api/servers/:id/token", userAuth, (req, res) => {
     if (!monitor.get(req.params.id)) return res.status(404).json({ error: "unknown server" });
     const token = monitor.rotateToken(req.params.id);
-    res.json({ token, env: monitor.envSnippet(token) });
+    res.json({ token, env: monitor.envSnippet(token), install: monitor.installCommand(token) });
+  });
+
+  app.post("/api/servers/:id/update", userAuth, (req, res) => {
+    if (!monitor.requestUpdate(req.params.id)) return res.status(404).json({ error: "unknown server" });
+    res.json({ ok: true });
+  });
+
+  app.post("/api/main/update", userAuth, async (req, res) => {
+    try {
+      res.json(await updateMain("dashboard"));
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   app.delete("/api/servers/:id", userAuth, (req, res) => {

@@ -32,6 +32,7 @@ export class Notifier {
       return;
     }
     if (this.queue.length > 1000) return console.warn("notification queue full, dropping message");
+    console.log("notify:", text.split("\n")[0].replace(/<[^>]+>/g, ""));
     this.queue.push({ text, important });
     this.drain();
   }

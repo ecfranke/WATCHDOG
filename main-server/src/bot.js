@@ -12,6 +12,8 @@ export const COMMANDS = [
   { command: "add", description: "Add a sub server: /add web-1" },
   { command: "token", description: "New token for a server: /token web-1" },
   { command: "remove", description: "Remove a server: /remove web-1" },
+  { command: "version", description: "Versions of main + sub servers" },
+  { command: "update", description: "Update from GitHub: /update all | main | <name>" },
   { command: "dashboard", description: "Open the live dashboard" },
   { command: "mute", description: "Mute notifications: /mute 60" },
   { command: "unmute", description: "Turn notifications back on" },
@@ -30,10 +32,13 @@ const HELP =
   "/alerts — servers down + active alerts\n" +
   "/dashboard — live charts\n" +
   "/mute 60 · /unmute — silence notifications\n\n" +
+  "<b>Updates</b> (from your GitHub repo)\n" +
+  "/version — which version each server runs\n" +
+  "/update all · /update main · /update &lt;name&gt; — update now\n\n" +
   "To connect a server: /add it here, then put the two lines you get into the <code>.env</code> " +
   "of the sub-server project on that machine and start it.";
 
-export function createBot(cfg, monitor, notifier, botOptions = {}) {
+export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = null) {
   const bot = new Bot(cfg.botToken, botOptions);
   const isPrivate = (ctx) => ctx.chat?.type === "private";
 
@@ -43,11 +48,17 @@ export function createBot(cfg, monitor, notifier, botOptions = {}) {
     return kb;
   };
 
-  const tokenMessage = (s, token, headline) =>
-    `${headline}\n\nPut this in the <code>.env</code> of the sub server:\n` +
-    `<pre>${esc(monitor.envSnippet(token))}</pre>\n` +
-    `Then start it (<code>npm start</code> or the systemd service).\n\n` +
-    `🔐 The token is shown only this once. Lost it? /token ${esc(s.id)}`;
+  const tokenMessage = (s, token, headline) => {
+    const install = monitor.installCommand(token);
+    return (
+      `${headline}\n\nPut this in the <code>.env</code> of the sub server:\n` +
+      `<pre>${esc(monitor.envSnippet(token))}</pre>\n` +
+      (install
+        ? `Or install it in one go on the sub server (Linux + systemd, auto-updates from GitHub):\n<pre>${esc(install)}</pre>\n`
+        : `Then start it (<code>sudo bash install.sh</code> or <code>npm start</code>).\n\n`) +
+      `🔐 The token is shown only this once. Lost it? /token ${esc(s.id)}`
+    );
+  };
 
   const unknown = (ctx, q) => {
     const names = monitor.list().map((s) => esc(s.name)).join(", ") || "none yet";
@@ -161,6 +172,67 @@ export function createBot(cfg, monitor, notifier, botOptions = {}) {
   bot.callbackQuery("cancel", async (ctx) => {
     await ctx.editMessageText("Cancelled.");
     return ctx.answerCallbackQuery();
+  });
+
+  // ---- versions & updates
+  bot.command("version", (ctx) => {
+    const latest = monitor.latestCommit();
+    const mv = monitor.updater?.info();
+    const lines = ["🏷 <b>Versions</b>", ""];
+    if (mv?.enabled) {
+      const state = !latest ? "" : mv.commit === latest ? " ✅" : mv.pending_restart ? " ⏳ restart pending" : ` ⬆️ behind (latest <code>${latest}</code>)`;
+      lines.push(`<b>Main server</b>: <code>${mv.commit}</code> on ${esc(mv.branch)}${state}`);
+      lines.push(`    ${esc(mv.remote)} · auto-update ${mv.auto ? "on" : "off"}`);
+      if (mv.error) lines.push(`    ❗ ${esc(mv.error)}`);
+    } else {
+      lines.push(`<b>Main server</b>: auto-update off (${esc(mv?.reason || "not a git install")})`);
+    }
+    lines.push("");
+    for (const s of monitor.list()) {
+      const v = s.version;
+      let state;
+      if (s.status === "pending") state = "never connected";
+      else if (!v?.commit) state = `no version info${v?.reason ? ` (${esc(v.reason)})` : ""}`;
+      else {
+        const mark = !latest ? "" : v.commit === latest ? " ✅" : v.pending_restart ? " ⏳ restart pending" : " ⬆️ behind";
+        state = `<code>${esc(v.commit)}</code>${mark}${v.auto === false ? " · manual updates" : ""}`;
+      }
+      lines.push(`${s.status === "online" ? "🟢" : s.status === "pending" ? "⚪" : "🔴"} <b>${esc(s.name)}</b>: ${state}${s.pendingUpdate ? " · update requested" : ""}`);
+      if (v?.error) lines.push(`    ❗ ${esc(v.error)}`);
+    }
+    if (latest) lines.push("", `Latest on GitHub: <code>${latest}</code>`);
+    return ctx.reply(lines.join("\n"), HTML);
+  });
+
+  bot.command("update", async (ctx) => {
+    const arg = (ctx.match || "").trim();
+    if (!arg) {
+      return ctx.reply(
+        "Usage:\n/update all — every sub server, then the main server\n/update main — only the main server\n/update &lt;name&gt; — one sub server",
+        HTML,
+      );
+    }
+    const doMain = async () => {
+      if (!updateMain) return "Main server: updates not available";
+      try {
+        const r = await updateMain("telegram");
+        if (r.status === "up-to-date") return `Main server: already up to date (<code>${r.version.commit}</code>)`;
+        if (r.status === "busy") return "Main server: an update is already running";
+        if (r.status === "updated") return `Main server: pulled <code>${r.from}</code> → <code>${r.to}</code> (no main-server changes, no restart)`;
+        return r.restarting ? `Main server: updating <code>${r.from}</code> → <code>${r.to}</code>, restarting…` : `Main server: updated to <code>${r.to}</code>, restart it to apply`;
+      } catch (e) {
+        return `Main server: ❗ ${esc(e.message)}`;
+      }
+    };
+    if (arg.toLowerCase() === "main") return ctx.reply(await doMain(), HTML);
+
+    const targets = arg.toLowerCase() === "all" ? monitor.list().filter((s) => s.status !== "pending") : [monitor.find(arg)].filter(Boolean);
+    if (!targets.length) return arg.toLowerCase() === "all" ? ctx.reply("No connected sub servers.") : unknown(ctx, arg);
+    for (const s of targets) monitor.requestUpdate(s.id);
+    const names = targets.map((s) => `<b>${esc(s.name)}</b>`).join(", ");
+    let text = `⬆️ Update requested for ${names}.\nOnline servers pull it on their next report (a few seconds); offline ones when they come back. You'll get a message for each one that updates.`;
+    if (arg.toLowerCase() === "all") text += `\n\n${await doMain()}`;
+    return ctx.reply(text, HTML);
   });
 
   bot.command("dashboard", (ctx) => {

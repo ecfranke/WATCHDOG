@@ -5,6 +5,10 @@
 //   MAIN_SERVER_URL=https://watchdog.example.com
 //   AGENT_TOKEN=wd_...            (from the main server: /add <name> in Telegram)
 //   INTERVAL_SECONDS=5
+//   AUTO_UPDATE=true              pull new versions from GitHub (needs a git clone, see install.sh)
+//   UPDATE_CHECK_MINUTES=30
+//   UPDATE_BRANCH=                default: the checked-out branch
+//   UPDATE_GITHUB_TOKEN=                 only for a private repository
 //
 //   npm start            run
 //   npm run check        print one sample and exit
@@ -22,6 +26,7 @@ const MAIN = (process.env.MAIN_SERVER_URL || "").trim().replace(/\/+$/, "");
 const TOKEN = (process.env.AGENT_TOKEN || "").trim();
 const INTERVAL = Math.max(1, Number(process.env.INTERVAL_SECONDS || 5)) * 1000;
 const ONCE = process.argv.includes("--once");
+const AUTO_UPDATE = !["0", "false", "no", "off"].includes(String(process.env.AUTO_UPDATE ?? "true").toLowerCase());
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -54,9 +59,32 @@ function systemShuttingDown() {
   });
 }
 
+/** Auto-update helper from ../../shared (present when installed from a git clone). */
+async function loadUpdater() {
+  let mod;
+  try {
+    mod = await import("../../shared/updater.js");
+  } catch {
+    return { updater: null, isSupervised: () => false };
+  }
+  const updater = await mod.createUpdater({
+    component: "sub-server",
+    appDir: ROOT,
+    branch: process.env.UPDATE_BRANCH || undefined,
+    auto: AUTO_UPDATE,
+    intervalMinutes: Number(process.env.UPDATE_CHECK_MINUTES || 30),
+    githubToken: process.env.UPDATE_GITHUB_TOKEN || "",
+    log,
+  });
+  return { updater, isSupervised: mod.isSupervised };
+}
+
 async function main() {
   const collector = new Collector();
   await collector.init();
+  const { updater, isSupervised } = await loadUpdater();
+  const versionInfo = () =>
+    updater ? { app: VERSION, ...updater.info() } : { app: VERSION, enabled: false, reason: "shared/updater.js not found" };
 
   if (ONCE) {
     await sleep(1000);
@@ -70,6 +98,30 @@ async function main() {
 
   let stopping = false;
   let wake = null;
+
+  // Install an update (automatic, or requested from the main server) and restart onto it.
+  const applyUpdate = async (why) => {
+    if (!updater?.enabled) return log(`Update requested but unavailable: ${updater?.reason || "no updater"}`);
+    try {
+      const r = await updater.update();
+      if (r.status === "up-to-date") return log(`Update check (${why}): already up to date (${updater.info().commit})`);
+      if (r.status === "busy") return;
+      restartAfterUpdate(r);
+    } catch (e) {
+      log(`Update failed: ${e.message}`);
+    }
+  };
+  function restartAfterUpdate(r) {
+    if (r.status === "updated") return log(`Updated ${r.from} → ${r.to} (no sub-server changes, no restart needed)`);
+    if (isSupervised()) {
+      log(`Updated ${r.from} → ${r.to}, restarting…`);
+      stopping = true; // exit without "goodbye": we're back within seconds, so no down alert
+      wake?.();
+      setTimeout(() => process.exit(0), 200);
+    } else {
+      log(`Updated ${r.from} → ${r.to}. Restart the agent to run the new version.`);
+    }
+  }
   const stop = async (signal) => {
     if (stopping) return;
     stopping = true;
@@ -87,6 +139,15 @@ async function main() {
   process.on("SIGINT", () => stop("SIGINT"));
 
   log(`Reporting to ${MAIN} every ${INTERVAL / 1000}s`);
+  if (updater?.enabled) {
+    log(`Auto-update ${AUTO_UPDATE ? "on" : "off"}: ${updater.remote} (${updater.branch}) @ ${updater.info().commit}`);
+    updater.start(
+      (r) => restartAfterUpdate(r),
+      (e) => log(`Auto-update: ${e.message}`),
+    );
+  } else {
+    log(`Auto-update off: ${updater?.reason || "shared/updater.js not found"}`);
+  }
   await sleep(1000); // let CPU counters accumulate
   let failures = 0;
   let registeredAs = null;
@@ -96,7 +157,10 @@ async function main() {
     let wait = INTERVAL;
     try {
       const sample = await collector.collect();
-      const res = await post("/api/agent/report", { ...sample, agent_version: VERSION, interval: INTERVAL / 1000, ts: Date.now() / 1000 });
+      const res = await post("/api/agent/report", {
+        ...sample, agent_version: VERSION, version: versionInfo(), interval: INTERVAL / 1000, ts: Date.now() / 1000,
+      });
+      if (res.update) applyUpdate("requested by the main server");
       if (registeredAs !== res.name) {
         log(`Connected — this server is "${res.name}" on the main server`);
         registeredAs = res.name;

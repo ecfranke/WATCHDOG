@@ -3,6 +3,12 @@
 import crypto from "node:crypto";
 import { esc, fmtClock, fmtDuration, metricsLine, nameHtml, statusMessage, worstDisk } from "./format.js";
 
+/** Builds a raw.githubusercontent.com URL for a file in a public GitHub repo. */
+function rawGithubUrl(remote, branch, file) {
+  const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(remote || ""));
+  return m ? `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${branch}/${file}` : null;
+}
+
 const REBOOT_TOLERANCE = 60; // seconds of boot-time drift ignored (NTP adjustments)
 const HISTORY_CAP = 5000;
 const nowSec = () => Date.now() / 1000;
@@ -47,6 +53,7 @@ export class Monitor {
     this.broadcast = broadcast;
     this.startedAt = nowSec();
     this.runtime = new Map(); // id -> { history: [], alerts: {} }
+    this.updater = null; // the main server's own Updater (set in index.js) — knows the latest commit
     this.byToken = new Map(); // tokenHash -> id
     this.rules = [
       { key: "cpu", label: "High CPU", unit: "%", threshold: cfg.cpuAlert, duration: cfg.cpuAlertFor,
@@ -88,6 +95,29 @@ export class Monitor {
 
   envSnippet(token) {
     return `MAIN_SERVER_URL=${this.cfg.publicUrl || "https://YOUR-MAIN-SERVER"}\nAGENT_TOKEN=${token}`;
+  }
+
+  /** One-line install command for a sub server, when the main server runs from a public GitHub clone. */
+  installCommand(token) {
+    const u = this.updater;
+    if (!u?.enabled || this.cfg.githubToken || !this.cfg.publicUrl) return null; // private repo: raw URL needs auth
+    const raw = rawGithubUrl(u.remote, u.branch, "sub-server/install.sh");
+    if (!raw) return null;
+    return `curl -fsSL ${raw} | sudo bash -s -- --repo ${u.remote} --branch ${u.branch} --main ${this.cfg.publicUrl} --token ${token}`;
+  }
+
+  /** Newest commit on GitHub (from the main server's last fetch), or null. */
+  latestCommit() {
+    return this.updater?.info().latest || null;
+  }
+
+  requestUpdate(id) {
+    const s = this.get(id);
+    if (!s) return false;
+    s.pendingUpdate = true;
+    this.store.save();
+    this.broadcast({ type: "update", server: this.summary(s) });
+    return true;
   }
 
   addServer(rawName) {
@@ -153,6 +183,8 @@ export class Monitor {
       last_seen: s.lastSeen,
       offline_reason: s.offlineReason,
       token_created_at: s.tokenCreatedAt,
+      version: s.version || null,
+      pending_update: Boolean(s.pendingUpdate),
       metrics: s.payload,
       alerts: Object.entries(rt.alerts)
         .filter(([, a]) => a.active)
@@ -221,9 +253,29 @@ export class Monitor {
       s.offlineReason = null;
     }
 
+    this.trackVersion(s, payload.version);
+    const update = Boolean(s.pendingUpdate);
+    s.pendingUpdate = false;
+
     this.evaluateAlerts(s, now);
     this.store.save();
     this.broadcast({ type: "update", server: this.summary(s), point: rt.history[rt.history.length - 1] });
+    return { update };
+  }
+
+  trackVersion(s, v) {
+    if (!v || typeof v !== "object") return;
+    const prev = s.version || {};
+    if (prev.commit && v.commit && prev.commit !== v.commit) {
+      this.notify(`⬆️ ${nameHtml(s)} updated <code>${esc(prev.commit)}</code> → <code>${esc(v.commit)}</code>`);
+    }
+    if (v.error && v.error !== prev.error) {
+      this.notify(`❗ ${nameHtml(s)}: update failed\n${esc(v.error)}`, true);
+    }
+    s.version = {
+      commit: v.commit || null, branch: v.branch || null, enabled: Boolean(v.enabled), auto: Boolean(v.auto),
+      reason: v.reason || null, error: v.error || null, app: v.app || null, pending_restart: Boolean(v.pending_restart),
+    };
   }
 
   handleGoodbye(s, reason) {

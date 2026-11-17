@@ -120,6 +120,9 @@ td .bar { margin-top: 4px; }
 .form-row .input { flex: 1; }
 pre.env { background: var(--page); border-radius: 10px; padding: 10px 12px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; margin: 10px 0; user-select: all; -webkit-user-select: all; }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.chip.info { background: rgba(42,120,214,.12); color: var(--link); }
+.foot { text-align: center; font-size: 12px; color: var(--muted); margin: 14px 0 4px; }
+.foot button { border: 0; background: none; color: var(--link); font-size: 12px; cursor: pointer; padding: 0 0 0 6px; }
 .err { color: var(--danger-text); font-size: 13px; margin-top: 8px; }
 .back { border: 0; background: none; color: var(--link); padding: 4px 0; margin-bottom: 6px; cursor: pointer; font-weight: 500; }
 .in-tg .back { display: none; }
@@ -275,6 +278,21 @@ function openList() {
   render();
 }
 
+// ------------------------------------------------------------------ versions
+function versionState(s) {
+  const v = s.version, latest = S.config.latest_commit;
+  if (!v || !v.commit) return null;
+  if (s.pending_update) return { text: "update requested", cls: "info" };
+  if (v.pending_restart) return { text: "restart pending", cls: "info" };
+  if (latest && v.commit !== latest) return { text: "update available", cls: "info" };
+  return null;
+}
+function versionFact(s) {
+  const v = s.version;
+  if (!v || !v.commit) return "";
+  return `<span class="num">v ${esc(v.commit)}${v.auto === false ? " · manual updates" : ""}</span>`;
+}
+
 // ------------------------------------------------------------------ render: list
 function meter(label, value, key, right) {
   const lv = level(value, key);
@@ -305,7 +323,9 @@ function serverCard(s) {
   const disk = worstDisk(m);
   const temp = m.temp && m.temp.max;
   const net = m.net || {};
-  const alerts = (s.alerts || []).map((a) => `<span class="chip">⚠ ${esc(a.label)}</span>`).join("");
+  const vs = versionState(s);
+  const alerts = (s.alerts || []).map((a) => `<span class="chip">⚠ ${esc(a.label)}</span>`).join("")
+    + (vs ? `<span class="chip ${vs.cls}">⬆ ${vs.text}</span>` : "");
   return `<div class="card server" data-id="${esc(s.id)}">${head}
     <div class="meters">
       ${meter("CPU", m.cpu && m.cpu.percent, "cpu")}
@@ -327,7 +347,16 @@ function renderList() {
     return `<div class="card empty"><h2>No servers yet</h2>
       <div class="muted">Add a server to get its token, put the token in the sub server's .env and start it.</div></div>${add}`;
   }
-  return list.map(serverCard).join("") + add;
+  return list.map(serverCard).join("") + add + mainFooter();
+}
+
+function mainFooter() {
+  const mv = S.config.main_version;
+  if (!mv) return "";
+  if (!mv.enabled) return `<div class="foot">Main server · auto-update off (${esc(mv.reason || "not a git install")})</div>`;
+  const latest = S.config.latest_commit;
+  const behind = latest && mv.commit !== latest;
+  return `<div class="foot">Main server v ${esc(mv.commit)} · ${esc(mv.branch)}${behind ? ` · latest ${esc(latest)}<button onclick="updateMain()">Update</button>` : latest ? " · up to date" : ""}</div>`;
 }
 
 // ------------------------------------------------------------------ render: detail
@@ -358,7 +387,9 @@ function renderDetail() {
   let html = `<button class="back" onclick="openList()">‹ All servers</button>
     <div class="dhead"><div class="row"><span class="name">${esc(s.name)}</span>${statusPill(s)}</div>
     <div class="facts"><span>${esc(m.os || "")} ${esc(m.arch || "")}</span>
-    ${online ? `<span>Up ${fmtDur(m.uptime)}</span>` : ""}<span class="num">Updated ${ago}</span></div></div>`;
+    ${online ? `<span>Up ${fmtDur(m.uptime)}</span>` : ""}<span class="num">Updated ${ago}</span>${versionFact(s)}</div>
+    ${(() => { const vs = versionState(s); return vs ? `<div class="chips"><span class="chip ${vs.cls}">⬆ ${vs.text}</span></div>` : ""; })()}
+    ${s.version && s.version.error ? `<div class="err">Update failed: ${esc(s.version.error)}</div>` : ""}</div>`;
 
   if ((s.alerts || []).length) {
     html += `<div class="card">${s.alerts.map((a) =>
@@ -404,6 +435,10 @@ function renderDetail() {
       `<tr><td>${esc(t.chip)} <span class="muted">${esc(t.label)}</span></td><td class="r num">${t.current.toFixed(0)}°C</td></tr>`).join("")}</table></div>`;
   }
 
+  if (s.version && s.version.enabled) {
+    html += `<button class="btn ghost wide" style="margin-bottom:8px" onclick="requestUpdate('${esc(s.id)}')"
+      ${s.pending_update ? "disabled" : ""}>${s.pending_update ? "⬆ Update requested…" : "⬆ Update from GitHub"}</button>`;
+  }
   html += `<div class="actions"><button class="btn ghost" onclick="rotateToken('${esc(s.id)}')">🔑 New token</button>
     <button class="danger-btn" onclick="removeServer('${esc(s.id)}')">Remove server</button></div>
     <div class="muted small" style="margin-top:8px;text-align:center">Token created ${s.token_created_at ? new Date(s.token_created_at * 1000).toLocaleString() : "—"}</div>`;
@@ -440,31 +475,52 @@ function openAdd() {
     try {
       const r = await api("/api/servers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
       S.servers.set(r.server.id, r.server); render();
-      showToken(r.server.name, r.env, "Server added");
+      showToken(r.server.name, r.env, "Server added", r.install);
     } catch (e) { $("#addErr").textContent = e.body && e.body.error ? e.body.error : "Could not create: " + e.message; }
   });
   window.scrollTo(0, 0); $("#addName").focus();
 }
-function showToken(name, env, title) {
+function showToken(name, env, title, install) {
   haptic("medium");
   $("#modal").innerHTML = `<div class="card"><h3>${esc(title)} · ${esc(name)}</h3>
     <div class="small">Put this in the <b>.env</b> of the sub server, then start it:</div>
     <pre class="env" id="envBox">${esc(env)}</pre>
+    ${install ? `<div class="small">Or install in one go on the sub server (Linux, auto-updates from GitHub):</div>
+    <pre class="env">${esc(install)}</pre><button class="btn ghost wide" id="copyInstall" style="margin-bottom:10px">Copy install command</button>` : ""}
     <div class="small muted">🔐 The token is shown only once. Copy it now.</div>
     <div class="actions" style="margin-top:10px"><button class="btn" id="copyBtn">Copy</button>
     <button class="btn ghost" onclick="closeModal()">Done</button></div></div>`;
+  if (install) $("#copyInstall").onclick = async () => {
+    try { await navigator.clipboard.writeText(install); $("#copyInstall").textContent = "Copied ✓"; } catch (e) { $("#copyInstall").textContent = "Select the text above to copy"; }
+  };
   $("#copyBtn").onclick = async () => {
     try { await navigator.clipboard.writeText(env); $("#copyBtn").textContent = "Copied ✓"; }
     catch (e) { const r = document.createRange(); r.selectNodeContents($("#envBox")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); $("#copyBtn").textContent = "Selected — copy it"; }
   };
   window.scrollTo(0, 0);
 }
+async function requestUpdate(id) {
+  haptic();
+  try {
+    await api(`/api/servers/${encodeURIComponent(id)}/update`, { method: "POST" });
+    const s = S.servers.get(id); if (s) { s.pending_update = true; render(); }
+  } catch (e) { alert("Could not request the update: " + e.message); }
+}
+function updateMain() {
+  confirmBox("Update the main server from GitHub now? It restarts if its code changed.", async () => {
+    try {
+      const r = await api("/api/main/update", { method: "POST" });
+      alert(r.status === "up-to-date" ? "The main server is already up to date." :
+        r.restarting ? `Updating ${r.from} → ${r.to}. The dashboard reconnects in a few seconds.` : `Updated to ${r.to}.`);
+    } catch (e) { alert("Update failed: " + (e.body && e.body.error ? e.body.error : e.message)); }
+  });
+}
 function rotateToken(id) {
   const s = S.servers.get(id); if (!s) return;
   confirmBox(`Make a new token for "${s.name}"? The current token stops working immediately.`, async () => {
     try {
       const r = await api(`/api/servers/${encodeURIComponent(id)}/token`, { method: "POST" });
-      showToken(s.name, r.env, "New token");
+      showToken(s.name, r.env, "New token", r.install);
     } catch (e) { alert("Could not make a new token: " + e.message); }
   });
 }

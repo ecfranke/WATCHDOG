@@ -5,9 +5,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/watchdog-main
-ExecStart=/usr/bin/node /opt/watchdog-main/src/index.js
+WorkingDirectory=/opt/watchdog/main-server
+ExecStart=/usr/bin/node /opt/watchdog/main-server/src/index.js
 Restart=always
+# (Restart=always is also how a downloaded update gets applied)
 RestartSec=5
 User=watchdog
 Group=watchdog
