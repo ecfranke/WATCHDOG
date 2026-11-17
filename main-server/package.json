@@ -1,0 +1,19 @@
+{
+  "name": "watchdog-main-server",
+  "version": "2.0.0",
+  "description": "Watchdog main server: Telegram bot, live dashboard, per-server tokens and alerts",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "grammy": "^1.30.0",
+    "ws": "^8.18.0"
+  }
+}

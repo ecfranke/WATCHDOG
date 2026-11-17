@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Watchdog</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --page:      var(--tg-theme-secondary-bg-color, #f0efec);
+  --card:      var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #fcfcfb));
+  --text:      var(--tg-theme-text-color, #0b0b0b);
+  --muted:     var(--tg-theme-hint-color, #6b6a66);
+  --link:      var(--tg-theme-link-color, #2a78d6);
+  --accent:    var(--tg-theme-button-color, #2a78d6);
+  --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  --danger-text: var(--tg-theme-destructive-text-color, #d03b3b);
+  --line:      rgba(127,127,127,.18);
+  --track:     rgba(127,127,127,.16);
+  /* chart palette (validated reference palette, light steps) */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --threshold: rgba(208,59,59,.55);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:  var(--tg-theme-secondary-bg-color, #111110);
+  --card:  var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #1a1a19));
+  --text:  var(--tg-theme-text-color, #f0efec);
+  --muted: var(--tg-theme-hint-color, #9a998f);
+  --line:  rgba(255,255,255,.10);
+  --track: rgba(255,255,255,.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --threshold: rgba(230,103,103,.6);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--text);
+  font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased; }
+body { padding: 12px 12px calc(24px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.small { font-size: 12.5px; }
+
+/* header */
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 4px 12px; }
+.top h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+.conn { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.conn.live i { background: var(--good); }
+.conn.down i { background: var(--critical); }
+.banner { background: var(--card); border-radius: 12px; padding: 10px 14px; margin-bottom: 10px; font-size: 13.5px; }
+
+/* cards */
+.card { background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+.server { cursor: pointer; transition: transform .08s ease; -webkit-tap-highlight-color: transparent; }
+.server:active { transform: scale(.99); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.name { font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 2px 8px;
+  border-radius: 999px; background: var(--track); white-space: nowrap; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; }
+.pill.on i { background: var(--good); }
+.pill.off { color: var(--danger-text); }
+.pill.off i { background: var(--critical); }
+.meters { display: grid; gap: 7px; margin-top: 12px; }
+.meter { display: grid; grid-template-columns: 42px 1fr 70px; align-items: center; gap: 10px; font-size: 13px; }
+.meter .lbl { color: var(--muted); }
+.meter .val { text-align: right; }
+.bar { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.bar > b { display: block; height: 100%; border-radius: 3px; background: var(--good); transition: width .4s ease; }
+.bar > b.warning { background: var(--warning); }
+.bar > b.critical { background: var(--critical); }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip { font-size: 12px; padding: 3px 8px; border-radius: 8px; background: rgba(208,59,59,.12); color: var(--danger-text); font-weight: 600; }
+.empty { text-align: center; padding: 40px 20px; }
+.empty h2 { font-size: 17px; margin: 0 0 6px; }
+
+/* detail */
+.dhead { margin-bottom: 10px; }
+.dhead .name { font-size: 20px; white-space: normal; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+.tile { background: var(--card); border-radius: 12px; padding: 10px 12px; min-width: 0; }
+.tile .k { font-size: 12px; color: var(--muted); }
+.tile .v { font-size: 22px; font-weight: 650; letter-spacing: -.02em; margin-top: 2px; }
+.tile .s { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 420px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+.chart-card h3, .card h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.chart-head .now { font-size: 13px; }
+.legend { display: flex; gap: 12px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+canvas.chart { width: 100%; height: 130px; display: block; touch-action: pan-y; }
+.cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 6px; }
+.core { height: 44px; border-radius: 6px; background: var(--track); position: relative; overflow: hidden; }
+.core > b { position: absolute; left: 0; right: 0; bottom: 0; background: var(--series-1); border-radius: 4px 4px 0 0; transition: height .4s ease; }
+.core > span { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 3px; font-size: 10.5px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td, th { padding: 6px 4px; text-align: left; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
+td.r, th.r { text-align: right; }
+td .bar { margin-top: 4px; }
+.danger-btn { width: 100%; border: 0; border-radius: 12px; padding: 12px; background: var(--card); color: var(--danger-text); font-weight: 600; cursor: pointer; }
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--text); color: var(--card); font-size: 12px;
+  padding: 6px 8px; border-radius: 8px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+.tip b { font-weight: 650; }
+.pill.wait i { background: var(--muted); }
+.btn { border: 0; border-radius: 10px; padding: 11px 14px; font-weight: 600; cursor: pointer; background: var(--accent); color: var(--accent-text); }
+.btn.ghost { background: var(--track); color: var(--text); }
+.btn.wide { width: 100%; }
+.add-card { border: 1.5px dashed var(--line); background: transparent; color: var(--link); text-align: center; font-weight: 600; cursor: pointer; width: 100%; }
+.input { width: 100%; font: inherit; color: var(--text); background: var(--page); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; outline: none; }
+.input:focus { border-color: var(--accent); }
+.form-row { display: flex; gap: 8px; margin-top: 10px; }
+.form-row .input { flex: 1; }
+pre.env { background: var(--page); border-radius: 10px; padding: 10px 12px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; margin: 10px 0; user-select: all; -webkit-user-select: all; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.err { color: var(--danger-text); font-size: 13px; margin-top: 8px; }
+.back { border: 0; background: none; color: var(--link); padding: 4px 0; margin-bottom: 6px; cursor: pointer; font-weight: 500; }
+.in-tg .back { display: none; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>🐕 Watchdog</h1>
+  <span id="conn" class="conn"><i></i><span>connecting…</span></span>
+</header>
+<div id="banner"></div>
+<div id="modal"></div>
+<main id="view"></main>
+<div id="tip" class="tip" hidden></div>
+
+<script>
+"use strict";
+const tg = window.Telegram && window.Telegram.WebApp;
+const initData = (tg && tg.initData) || "";
+if (tg && initData) document.body.classList.add("in-tg");
+const BASE = location.pathname.replace(/\/app(\/.*)?$/, "");
+
+const S = {
+  servers: new Map(), config: {}, skew: 0,
+  view: "list", current: null, history: new Map(), hover: null,
+  ws: null, retry: 0, authError: null,
+};
+
+// ------------------------------------------------------------------ utils
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const now = () => Date.now() / 1000 + S.skew;
+const pct = (v) => (v == null ? "—" : `${Math.round(v)}%`);
+function fmtBytes(n) {
+  if (n == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (Math.abs(n) >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return i === 0 ? `${Math.round(n)} B` : `${n.toFixed(n >= 100 ? 0 : 1)} ${u[i]}`;
+}
+const fmtRate = (n) => (n == null ? "—" : `${fmtBytes(n)}/s`);
+function fmtDur(sec) {
+  if (sec == null) return "—";
+  sec = Math.max(0, Math.floor(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  if (d) return `${d}d ${h}h`; if (h) return `${h}h ${m}m`; if (m) return `${m}m`; return `${s}s`;
+}
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function level(v, key) {
+  const t = S.config.thresholds && S.config.thresholds[key];
+  if (v == null || !t) return "";
+  if (v >= t) return "critical";
+  if (v >= t - 15) return "warning";
+  return "";
+}
+function worstDisk(m) {
+  const d = (m && m.disks) || [];
+  return d.length ? d.reduce((a, b) => (b.percent > a.percent ? b : a)) : null;
+}
+function haptic(type) { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(type || "light"); } catch (e) {} }
+
+// ------------------------------------------------------------------ theme
+function applyTheme() {
+  const dark = tg && tg.colorScheme ? tg.colorScheme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+}
+applyTheme();
+if (tg) {
+  tg.ready(); tg.expand();
+  tg.onEvent("themeChanged", () => { applyTheme(); render(); });
+  tg.BackButton.onClick(() => openList());
+}
+
+// ------------------------------------------------------------------ network
+async function api(path, opts = {}) {
+  const res = await fetch(BASE + path, { ...opts, headers: { "X-Telegram-Init-Data": initData, ...(opts.headers || {}) } });
+  if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; try { e.body = await res.json(); } catch (_) {} throw e; }
+  return res.json();
+}
+
+function setConn(cls, text) {
+  const el = $("#conn"); el.className = "conn " + cls; el.lastElementChild.textContent = text;
+}
+
+async function connect() {
+  try {
+    await api("/api/me");
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) {
+      S.authError = e.status === 403
+        ? "Your Telegram account is not in ADMIN_IDS on the hub."
+        : "Open this dashboard from the Watchdog bot in Telegram.";
+      setConn("down", "not authorized"); render(); return;
+    }
+    return scheduleReconnect();
+  }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}${BASE}/ws?initData=${encodeURIComponent(initData)}`);
+  S.ws = ws;
+  ws.onopen = () => { S.retry = 0; setConn("live", "live"); };
+  ws.onmessage = (ev) => handle(JSON.parse(ev.data));
+  ws.onclose = () => { if (S.ws === ws) { setConn("down", "reconnecting…"); scheduleReconnect(); } };
+}
+function scheduleReconnect() {
+  S.retry = Math.min(S.retry + 1, 6);
+  setTimeout(connect, 500 * 2 ** S.retry);
+}
+setInterval(() => { if (S.ws && S.ws.readyState === 1) S.ws.send("ping"); }, 25000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && (!S.ws || S.ws.readyState > 1) && !S.authError) connect();
+});
+
+function handle(msg) {
+  if (msg.now) S.skew = msg.now - Date.now() / 1000;
+  if (msg.type === "snapshot") {
+    S.servers = new Map(msg.servers.map((s) => [s.id, s]));
+    S.config = msg.config || {};
+    if (S.view === "detail" && S.current) loadHistory(S.current);
+    render();
+  } else if (msg.type === "update") {
+    S.servers.set(msg.server.id, msg.server);
+    if (msg.point && S.history.has(msg.server.id)) {
+      const h = S.history.get(msg.server.id);
+      h.push(msg.point);
+      const cutoff = msg.point[0] - (S.config.history_minutes || 60) * 60;
+      while (h.length && h[0][0] < cutoff) h.shift();
+    }
+    if (S.view === "list" || S.current === msg.server.id) render();
+  } else if (msg.type === "removed") {
+    S.servers.delete(msg.id); S.history.delete(msg.id);
+    if (S.current === msg.id) openList(); else render();
+  }
+}
+
+async function loadHistory(id) {
+  try {
+    const r = await api(`/api/servers/${encodeURIComponent(id)}/history`);
+    S.history.set(id, r.history);
+    if (S.current === id) render();
+  } catch (e) { /* server may be gone */ }
+}
+
+// ------------------------------------------------------------------ navigation
+function openServer(id) {
+  haptic();
+  S.view = "detail"; S.current = id; S.hover = null;
+  if (tg) tg.BackButton.show();
+  loadHistory(id); render(); window.scrollTo(0, 0);
+}
+function openList() {
+  S.view = "list"; S.current = null; S.hover = null;
+  if (tg) tg.BackButton.hide();
+  render();
+}
+
+// ------------------------------------------------------------------ render: list
+function meter(label, value, key, right) {
+  const lv = level(value, key);
+  return `<div class="meter"><span class="lbl">${label}</span>
+    <div class="bar"><b class="${lv}" style="width:${Math.min(100, Math.max(0, value || 0))}%"></b></div>
+    <span class="val num">${right ?? pct(value)}</span></div>`;
+}
+
+function statusPill(s) {
+  if (s.status === "pending") return `<span class="pill wait"><i></i>Waiting</span>`;
+  if (s.status === "online") return `<span class="pill on"><i></i>Online</span>`;
+  const why = s.offline_reason === "shutdown" ? "Shut down" : s.offline_reason === "agent_stopped" ? "Agent stopped" : "Offline";
+  return `<span class="pill off"><i></i>${why} · ${fmtDur(now() - (s.status_since || now()))}</span>`;
+}
+
+function serverCard(s) {
+  const m = s.metrics || {};
+  const head = `<div class="row"><span class="name">${esc(s.name)}</span>${statusPill(s)}</div>`;
+  if (s.status === "pending") {
+    return `<div class="card server" data-id="${esc(s.id)}">${head}
+      <div class="facts"><span>Waiting for the sub server — put its token in the sub server's .env and start it.</span></div></div>`;
+  }
+  if (s.status !== "online") {
+    return `<div class="card server" data-id="${esc(s.id)}">${head}
+      <div class="facts"><span>Last seen ${s.last_seen ? fmtTime(s.last_seen) : "never"}</span>
+      ${m.os ? `<span>${esc(m.os)}</span>` : ""}</div></div>`;
+  }
+  const disk = worstDisk(m);
+  const temp = m.temp && m.temp.max;
+  const net = m.net || {};
+  const alerts = (s.alerts || []).map((a) => `<span class="chip">⚠ ${esc(a.label)}</span>`).join("");
+  return `<div class="card server" data-id="${esc(s.id)}">${head}
+    <div class="meters">
+      ${meter("CPU", m.cpu && m.cpu.percent, "cpu")}
+      ${meter("RAM", m.mem && m.mem.percent, "ram")}
+      ${disk ? meter("Disk", disk.percent, "disk") : ""}
+      ${temp != null ? meter("Temp", Math.min(100, temp), "temp", `${Math.round(temp)}°C`) : ""}
+    </div>
+    <div class="facts num"><span>Up ${fmtDur(m.uptime)}</span>
+      <span>↓ ${fmtRate(net.rx_rate)}</span><span>↑ ${fmtRate(net.tx_rate)}</span>
+      ${m.cpu && m.cpu.load ? `<span>Load ${m.cpu.load[0].toFixed(2)}</span>` : ""}</div>
+    ${alerts ? `<div class="chips">${alerts}</div>` : ""}</div>`;
+}
+
+function renderList() {
+  const rank = { offline: 0, online: 1, pending: 2 };
+  const list = [...S.servers.values()].sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
+  const add = `<button class="card add-card" onclick="openAdd()">＋ Add server</button>`;
+  if (!list.length) {
+    return `<div class="card empty"><h2>No servers yet</h2>
+      <div class="muted">Add a server to get its token, put the token in the sub server's .env and start it.</div></div>${add}`;
+  }
+  return list.map(serverCard).join("") + add;
+}
+
+// ------------------------------------------------------------------ render: detail
+function tile(k, v, s) { return `<div class="tile"><div class="k">${k}</div><div class="v num">${v}</div><div class="s">${s || "&nbsp;"}</div></div>`; }
+
+function chartCard(id, title, now, legend) {
+  return `<div class="card chart-card"><div class="chart-head"><h3>${title}</h3>
+    ${legend ? `<div class="legend">${legend}</div>` : `<span class="now num">${now}</span>`}</div>
+    <canvas class="chart" id="${id}"></canvas></div>`;
+}
+
+function renderDetail() {
+  const s = S.servers.get(S.current);
+  if (!s) return `<div class="card empty"><h2>Server not found</h2></div>`;
+  if (s.status === "pending" || !s.metrics) {
+    return `<button class="back" onclick="openList()">‹ All servers</button>
+      <div class="dhead"><div class="row"><span class="name">${esc(s.name)}</span>${statusPill(s)}</div></div>
+      <div class="card"><b>Waiting for the first report</b><div class="muted small" style="margin-top:6px">
+      On the sub server: put <code>MAIN_SERVER_URL</code> and <code>AGENT_TOKEN</code> in <code>.env</code>, then run
+      <code>npm start</code> or <code>sudo bash install.sh</code>. Lost the token? Make a new one below.</div></div>
+      <div class="actions"><button class="btn ghost" onclick="rotateToken('${esc(s.id)}')">🔑 New token</button>
+      <button class="danger-btn" onclick="removeServer('${esc(s.id)}')">Remove server</button></div>`;
+  }
+  const m = s.metrics || {};
+  const cpu = m.cpu || {}, mem = m.mem || {}, net = m.net || {}, temp = m.temp;
+  const online = s.status === "online";
+  const ago = s.last_seen ? `${fmtDur(now() - s.last_seen)} ago` : "never";
+  let html = `<button class="back" onclick="openList()">‹ All servers</button>
+    <div class="dhead"><div class="row"><span class="name">${esc(s.name)}</span>${statusPill(s)}</div>
+    <div class="facts"><span>${esc(m.os || "")} ${esc(m.arch || "")}</span>
+    ${online ? `<span>Up ${fmtDur(m.uptime)}</span>` : ""}<span class="num">Updated ${ago}</span></div></div>`;
+
+  if ((s.alerts || []).length) {
+    html += `<div class="card">${s.alerts.map((a) =>
+      `<div class="chip" style="display:inline-block;margin:2px 4px 2px 0">⚠ ${esc(a.label)}${a.detail ? " · " + esc(a.detail) : ""} — ${Math.round(a.value)}${esc(a.unit || "")} · for ${fmtDur(now() - a.since)}</div>`).join("")}</div>`;
+  }
+
+  html += `<div class="tiles">
+    ${tile("CPU", pct(cpu.percent), cpu.count ? `${cpu.count} cores${cpu.freq_mhz ? " · " + (cpu.freq_mhz / 1000).toFixed(1) + " GHz" : ""}` : "")}
+    ${tile("RAM", pct(mem.percent), mem.total ? `${fmtBytes(mem.used)} of ${fmtBytes(mem.total)}` : "")}
+    ${tile("Temp", temp ? `${Math.round(temp.max)}°C` : "—", temp ? esc(temp.max_label) : "no sensors")}
+    ${tile("Load", cpu.load ? cpu.load[0].toFixed(2) : "—", cpu.load ? `${cpu.load[1].toFixed(2)} · ${cpu.load[2].toFixed(2)}` : "")}
+  </div>`;
+
+  html += chartCard("c-cpu", "CPU %", pct(cpu.percent));
+  html += chartCard("c-ram", "RAM %", pct(mem.percent));
+  if (temp) html += chartCard("c-temp", "Temperature °C", `${Math.round(temp.max)}°C`);
+  html += chartCard("c-net", "Network", "",
+    `<span><i style="background:var(--series-1)"></i>↓ ${fmtRate(net.rx_rate)}</span><span><i style="background:var(--series-2)"></i>↑ ${fmtRate(net.tx_rate)}</span>`);
+
+  if (cpu.per_core && cpu.per_core.length > 1) {
+    html += `<div class="card"><h3>Cores</h3><div class="cores">${cpu.per_core.map((v, i) =>
+      `<div class="core" title="Core ${i}: ${Math.round(v)}%"><b style="height:${v}%"></b><span class="num">${Math.round(v)}</span></div>`).join("")}</div></div>`;
+  }
+
+  if ((m.disks || []).length) {
+    html += `<div class="card"><h3>Disks</h3><table><tr><th>Mount</th><th class="r">Used</th><th class="r">Size</th></tr>
+      ${m.disks.map((d) => `<tr><td>${esc(d.mount)}<div class="bar"><b class="${level(d.percent, "disk")}" style="width:${d.percent}%"></b></div></td>
+      <td class="r num">${pct(d.percent)}</td><td class="r num">${fmtBytes(d.total)}</td></tr>`).join("")}</table>
+      ${m.diskio ? `<div class="facts num"><span>Read ${fmtRate(m.diskio.read_rate)}</span><span>Write ${fmtRate(m.diskio.write_rate)}</span>
+      ${m.swap && m.swap.total ? `<span>Swap ${pct(m.swap.percent)} of ${fmtBytes(m.swap.total)}</span>` : ""}</div>` : ""}</div>`;
+  }
+
+  const procs = m.procs;
+  if (procs && procs.top_cpu) {
+    html += `<div class="card"><h3>Top processes · ${procs.count} total</h3><table>
+      <tr><th>Name</th><th class="r">PID</th><th class="r">CPU</th><th class="r">RAM</th></tr>
+      ${procs.top_cpu.map((p) => `<tr><td>${esc(p.name)}</td><td class="r num muted">${p.pid}</td><td class="r num">${p.cpu.toFixed(1)}%</td><td class="r num">${p.mem.toFixed(1)}%</td></tr>`).join("")}
+      </table></div>`;
+  }
+
+  if (temp && temp.sensors && temp.sensors.length > 1) {
+    html += `<div class="card"><h3>Sensors</h3><table>${temp.sensors.map((t) =>
+      `<tr><td>${esc(t.chip)} <span class="muted">${esc(t.label)}</span></td><td class="r num">${t.current.toFixed(0)}°C</td></tr>`).join("")}</table></div>`;
+  }
+
+  html += `<div class="actions"><button class="btn ghost" onclick="rotateToken('${esc(s.id)}')">🔑 New token</button>
+    <button class="danger-btn" onclick="removeServer('${esc(s.id)}')">Remove server</button></div>
+    <div class="muted small" style="margin-top:8px;text-align:center">Token created ${s.token_created_at ? new Date(s.token_created_at * 1000).toLocaleString() : "—"}</div>`;
+  return html;
+}
+
+function removeServer(id) {
+  const s = S.servers.get(id); if (!s) return;
+  const go = async () => {
+    try { await api(`/api/servers/${encodeURIComponent(id)}`, { method: "DELETE" }); openList(); }
+    catch (e) { alert("Could not remove: " + e.message); }
+  };
+  const text = `Remove "${s.name}"? Its token is revoked and it stops being monitored.`;
+  confirmBox(text, go);
+}
+
+// ------------------------------------------------------------------ add server / tokens
+function closeModal() { $("#modal").innerHTML = ""; }
+function confirmBox(text, fn) {
+  if (tg && tg.showConfirm && initData) tg.showConfirm(text, (ok) => ok && fn());
+  else if (confirm(text)) fn();
+}
+function openAdd() {
+  haptic();
+  $("#modal").innerHTML = `<div class="card"><h3>Add a sub server</h3>
+    <form id="addForm" class="form-row" autocomplete="off">
+      <input class="input" id="addName" maxlength="40" placeholder="Name, e.g. web-1" required>
+      <button class="btn" type="submit">Create</button></form>
+    <div id="addErr" class="err"></div>
+    <button class="btn ghost wide" style="margin-top:10px" onclick="closeModal()">Cancel</button></div>`;
+  $("#addForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const name = $("#addName").value.trim(); if (!name) return;
+    try {
+      const r = await api("/api/servers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+      S.servers.set(r.server.id, r.server); render();
+      showToken(r.server.name, r.env, "Server added");
+    } catch (e) { $("#addErr").textContent = e.body && e.body.error ? e.body.error : "Could not create: " + e.message; }
+  });
+  window.scrollTo(0, 0); $("#addName").focus();
+}
+function showToken(name, env, title) {
+  haptic("medium");
+  $("#modal").innerHTML = `<div class="card"><h3>${esc(title)} · ${esc(name)}</h3>
+    <div class="small">Put this in the <b>.env</b> of the sub server, then start it:</div>
+    <pre class="env" id="envBox">${esc(env)}</pre>
+    <div class="small muted">🔐 The token is shown only once. Copy it now.</div>
+    <div class="actions" style="margin-top:10px"><button class="btn" id="copyBtn">Copy</button>
+    <button class="btn ghost" onclick="closeModal()">Done</button></div></div>`;
+  $("#copyBtn").onclick = async () => {
+    try { await navigator.clipboard.writeText(env); $("#copyBtn").textContent = "Copied ✓"; }
+    catch (e) { const r = document.createRange(); r.selectNodeContents($("#envBox")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); $("#copyBtn").textContent = "Selected — copy it"; }
+  };
+  window.scrollTo(0, 0);
+}
+function rotateToken(id) {
+  const s = S.servers.get(id); if (!s) return;
+  confirmBox(`Make a new token for "${s.name}"? The current token stops working immediately.`, async () => {
+    try {
+      const r = await api(`/api/servers/${encodeURIComponent(id)}/token`, { method: "POST" });
+      showToken(s.name, r.env, "New token");
+    } catch (e) { alert("Could not make a new token: " + e.message); }
+  });
+}
+
+// ------------------------------------------------------------------ charts
+function drawCharts() {
+  const s = S.servers.get(S.current); if (!s) return;
+  const h = S.history.get(S.current) || [];
+  const th = S.config.thresholds || {};
+  const span = (S.config.history_minutes || 60) * 60;
+  const tEnd = now(), tStart = tEnd - span;
+  const c1 = css("--series-1"), c2 = css("--series-2");
+  const opts = { tStart, tEnd, gap: Math.max(20, ((s.metrics && s.metrics.interval) || 5) * 4) };
+  lineChart("c-cpu", h, [{ i: 1, color: c1, name: "CPU", fmt: pct }], { ...opts, min: 0, max: 100, threshold: th.cpu });
+  lineChart("c-ram", h, [{ i: 2, color: c1, name: "RAM", fmt: pct }], { ...opts, min: 0, max: 100, threshold: th.ram });
+  lineChart("c-temp", h, [{ i: 3, color: c1, name: "Temp", fmt: (v) => `${Math.round(v)}°C` }], { ...opts, min: 20, threshold: th.temp });
+  lineChart("c-net", h, [
+    { i: 4, color: c1, name: "↓ In", fmt: fmtRate },
+    { i: 5, color: c2, name: "↑ Out", fmt: fmtRate },
+  ], { ...opts, min: 0, axisFmt: fmtBytes });
+}
+
+function lineChart(id, hist, series, o) {
+  const cv = document.getElementById(id); if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr);
+  const pad = { l: 4, r: 44, t: 8, b: 18 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+
+  let lo = o.min ?? Infinity, hi = o.max ?? -Infinity;
+  if (o.max == null || o.min == null) {
+    for (const p of hist) for (const s of series) { const v = p[s.i]; if (v != null) { if (o.min == null) lo = Math.min(lo, v); if (o.max == null) hi = Math.max(hi, v); } }
+    if (o.threshold && o.max == null) hi = Math.max(hi, o.threshold + 5);
+    if (!isFinite(hi)) hi = 1;
+    if (!isFinite(lo)) lo = 0;
+    if (o.max == null) hi = hi <= 0 ? 1 : hi * 1.15;
+    if (hi - lo < 1) hi = lo + 1;
+  }
+  const x = (t) => pad.l + ((t - o.tStart) / (o.tEnd - o.tStart)) * pw;
+  const y = (v) => pad.t + ph - ((v - lo) / (hi - lo)) * ph;
+  const muted = css("--muted"), grid = css("--line");
+
+  // grid + y labels (recessive)
+  ctx.font = "10.5px -apple-system, system-ui, sans-serif"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 1;
+  for (let k = 0; k <= 2; k++) {
+    const v = lo + (hi - lo) * (k / 2), yy = Math.round(y(v)) + .5;
+    ctx.strokeStyle = grid; ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(pad.l + pw, yy); ctx.stroke();
+    ctx.fillStyle = muted; ctx.textAlign = "left";
+    ctx.fillText(o.axisFmt ? o.axisFmt(v) : Math.round(v), pad.l + pw + 6, yy);
+  }
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = muted;
+  ctx.fillText(`-${Math.round((o.tEnd - o.tStart) / 60)}m`, pad.l, H - 3);
+  ctx.textAlign = "right"; ctx.fillText("now", pad.l + pw, H - 3);
+
+  // threshold line
+  if (o.threshold && o.threshold > lo && o.threshold < hi) {
+    const ty = Math.round(y(o.threshold)) + .5;
+    ctx.strokeStyle = css("--threshold"); ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(pad.l, ty); ctx.lineTo(pad.l + pw, ty); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  if (!hist.length) {
+    ctx.fillStyle = muted; ctx.textAlign = "center"; ctx.fillText("collecting data…", pad.l + pw / 2, pad.t + ph / 2);
+    cv._chart = null; return;
+  }
+
+  // series: 2px lines, broken across gaps (server was offline)
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath(); let prev = null;
+    for (const p of hist) {
+      const v = p[s.i]; if (v == null || p[0] < o.tStart) { prev = null; continue; }
+      const px = x(p[0]), py = y(Math.min(hi, Math.max(lo, v)));
+      if (prev && p[0] - prev <= o.gap) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+      prev = p[0];
+    }
+    ctx.stroke();
+  }
+
+  cv._chart = { hist, series, x, y, lo, hi, pad, pw, ph, o };
+  const hv = S.hover && S.hover.id === id ? S.hover : null;
+  if (hv) drawHover(cv, ctx, hv.idx);
+}
+
+function drawHover(cv, ctx, idx) {
+  const c = cv._chart; if (!c) return;
+  const p = c.hist[idx]; if (!p) return;
+  const px = c.x(p[0]);
+  ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(Math.round(px) + .5, c.pad.t); ctx.lineTo(Math.round(px) + .5, c.pad.t + c.ph); ctx.stroke();
+  for (const s of c.series) {
+    const v = p[s.i]; if (v == null) continue;
+    const py = c.y(Math.min(c.hi, Math.max(c.lo, v)));
+    ctx.fillStyle = css("--card"); ctx.beginPath(); ctx.arc(px, py, 5.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = s.color; ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function nearestIndex(hist, t) {
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < hist.length; i++) { const d = Math.abs(hist[i][0] - t); if (d < bd) { bd = d; best = i; } }
+  return best;
+}
+
+function onPointer(ev) {
+  const cv = ev.target.closest && ev.target.closest("canvas.chart");
+  const tip = $("#tip");
+  if (!cv || !cv._chart) { if (S.hover) { S.hover = null; tip.hidden = true; drawCharts(); } return; }
+  const c = cv._chart, r = cv.getBoundingClientRect();
+  const px = ev.clientX - r.left;
+  const t = c.o.tStart + ((px - c.pad.l) / c.pw) * (c.o.tEnd - c.o.tStart);
+  const idx = nearestIndex(c.hist, t); if (idx < 0) return;
+  S.hover = { id: cv.id, idx };
+  drawCharts();
+  const p = c.hist[idx];
+  tip.innerHTML = `<span class="num">${fmtTime(p[0])}</span>` + c.series.map((s) =>
+    `<br><span style="color:${s.color}">■</span> ${s.name} <b class="num">${p[s.i] == null ? "—" : s.fmt(p[s.i])}</b>`).join("");
+  tip.hidden = false;
+  const tw = tip.offsetWidth;
+  let left = ev.clientX + 12; if (left + tw > window.innerWidth - 8) left = ev.clientX - tw - 12;
+  tip.style.left = `${Math.max(8, left)}px`; tip.style.top = `${r.top + 4}px`;
+}
+document.addEventListener("pointermove", onPointer);
+document.addEventListener("pointerdown", onPointer);
+document.addEventListener("scroll", () => { if (S.hover) { S.hover = null; $("#tip").hidden = true; drawCharts(); } }, { passive: true });
+
+// ------------------------------------------------------------------ render
+function renderBanner() {
+  const b = $("#banner");
+  if (S.authError) { b.innerHTML = `<div class="banner">⛔ ${esc(S.authError)}</div>`; return; }
+  const all = [...S.servers.values()];
+  if (S.view !== "list" || !all.length) { b.innerHTML = ""; return; }
+  const on = all.filter((s) => s.status === "online").length;
+  const waiting = all.filter((s) => s.status === "pending").length;
+  const alerts = all.reduce((n, s) => n + (s.status === "online" ? (s.alerts || []).length : 0), 0);
+  const muted = S.config.muted_until && S.config.muted_until > now()
+    ? ` · 🔕 muted until ${new Date(S.config.muted_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const live = all.length - waiting;
+  const healthy = on === live && !alerts;
+  const status = (healthy ? (live ? "✅ All systems healthy" : "⚪ No server connected yet") : `${on === live ? "🟢" : "🔴"} ${on} of ${live} online${alerts ? ` · ⚠ ${alerts} alert${alerts > 1 ? "s" : ""}` : ""}`)
+    + (waiting ? ` · ${waiting} waiting` : "");
+  b.innerHTML = `<div class="banner">${status}${muted}</div>`;
+}
+
+function render() {
+  renderBanner();
+  if (S.authError) { $("#view").innerHTML = ""; return; }
+  if (S.view === "detail") { $("#view").innerHTML = renderDetail(); drawCharts(); }
+  else $("#view").innerHTML = renderList();
+}
+
+$("#view").addEventListener("click", (ev) => {
+  const card = ev.target.closest(".server");
+  if (card) openServer(card.dataset.id);
+});
+window.addEventListener("resize", () => { if (S.view === "detail") drawCharts(); });
+setInterval(() => { if (!S.hover) render(); }, 5000); // keep "x ago" fresh
+
+connect();
+</script>
+</body>
+</html>

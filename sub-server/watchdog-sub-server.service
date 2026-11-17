@@ -1,0 +1,19 @@
+[Unit]
+Description=Watchdog sub server (reports metrics to the main server)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/watchdog-sub-server
+ExecStart=@NODE@ /opt/watchdog-sub-server/src/agent.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+# Runs as root so it can read every process and sensor; it only reads, never writes.
+Nice=10
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Watchdog main server (Telegram bot + dashboard)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/watchdog-main
+ExecStart=/usr/bin/node /opt/watchdog-main/src/index.js
+Restart=always
+RestartSec=5
+User=watchdog
+Group=watchdog
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+services:
+  watchdog-main:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_FILE: /data/watchdog.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - watchdog-data:/data
+
+volumes:
+  watchdog-data:
