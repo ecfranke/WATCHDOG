@@ -6,7 +6,8 @@
   "main": "src/agent.js",
   "scripts": {
     "start": "node src/agent.js",
-    "check": "node src/agent.js --once"
+    "check": "node src/agent.js --once",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18.17"

@@ -7,10 +7,14 @@ import { Monitor } from "./monitor.js";
 import { Notifier } from "./notifier.js";
 import { createBot, runBot } from "./bot.js";
 import { createServer } from "./server.js";
-import { esc } from "./format.js";
+import { esc, setTimezone } from "./format.js";
 
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cfg = loadConfig();
+if (!setTimezone(cfg.timezone)) console.warn(`Unknown TIMEZONE "${cfg.timezone}", using the machine's time zone`);
+
+// Log stray async errors instead of crashing: a crash would drop live history and alert state.
+process.on("unhandledRejection", (e) => console.error("unhandled rejection:", e));
 const store = new Store(cfg.dataFile);
 
 // The monitor pushes to the dashboard through `broadcast`, which exists once the HTTP server does.
@@ -46,7 +50,7 @@ function restartForUpdate(r) {
   if (restarting) return true;
   restarting = true;
   notifier.send(`⬆️ Main server updated <code>${r.from}</code> → <code>${r.to}</code>, restarting…`);
-  setTimeout(() => shutdown("update"), 2500); // give the notification a moment to go out
+  setTimeout(() => shutdown("update"), 500);
   return true;
 }
 
@@ -108,15 +112,19 @@ runBot(realBot, cfg, () => {
   store.setKv("lastUpdateError", null);
 });
 
-function shutdown(reason) {
+let shuttingDown = false;
+async function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`Shutting down (${reason})`);
   monitor.stop();
   u?.stop();
   store.flush();
+  setTimeout(() => process.exit(0), 8000).unref(); // never hang
+  await notifier.flush(5000); // let queued Telegram messages go out first
   realBot.stop().catch(() => {});
-  http.server.close(() => process.exit(0));
-  http.server.closeAllConnections?.();
-  setTimeout(() => process.exit(0), 3000).unref();
+  await http.close();
+  process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));

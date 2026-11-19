@@ -208,6 +208,8 @@ function setConn(cls, text) {
 }
 
 async function connect() {
+  clearTimeout(S.reconnectTimer);
+  if (S.ws && S.ws.readyState <= 1) return; // already connecting / connected
   try {
     await api("/api/me");
   } catch (e) {
@@ -220,15 +222,28 @@ async function connect() {
     return scheduleReconnect();
   }
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}${BASE}/ws?initData=${encodeURIComponent(initData)}`);
+  // the Telegram login goes in the first message, not the URL (URLs end up in server logs)
+  const ws = new WebSocket(`${proto}://${location.host}${BASE}/ws`);
   S.ws = ws;
-  ws.onopen = () => { S.retry = 0; setConn("live", "live"); };
-  ws.onmessage = (ev) => handle(JSON.parse(ev.data));
-  ws.onclose = () => { if (S.ws === ws) { setConn("down", "reconnecting…"); scheduleReconnect(); } };
+  ws.onopen = () => { ws.send(JSON.stringify({ type: "auth", initData })); };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "snapshot") { S.retry = 0; setConn("live", "live"); }
+    handle(msg);
+  };
+  ws.onclose = (ev) => {
+    if (S.ws !== ws) return;
+    if (ev.code === 4401 || ev.code === 4403) {
+      S.authError = ev.code === 4403 ? "Your Telegram account is not in ADMIN_IDS on the main server." : "Open this dashboard from the Watchdog bot in Telegram.";
+      setConn("down", "not authorized"); render(); return;
+    }
+    setConn("down", "reconnecting…"); scheduleReconnect();
+  };
 }
 function scheduleReconnect() {
+  clearTimeout(S.reconnectTimer);
   S.retry = Math.min(S.retry + 1, 6);
-  setTimeout(connect, 500 * 2 ** S.retry);
+  S.reconnectTimer = setTimeout(connect, 500 * 2 ** S.retry);
 }
 setInterval(() => { if (S.ws && S.ws.readyState === 1) S.ws.send("ping"); }, 25000);
 document.addEventListener("visibilitychange", () => {
@@ -250,7 +265,7 @@ function handle(msg) {
       const cutoff = msg.point[0] - (S.config.history_minutes || 60) * 60;
       while (h.length && h[0][0] < cutoff) h.shift();
     }
-    if (S.view === "list" || S.current === msg.server.id) render();
+    if (S.view === "list" || S.current === msg.server.id) scheduleRender();
   } else if (msg.type === "removed") {
     S.servers.delete(msg.id); S.history.delete(msg.id);
     if (S.current === msg.id) openList(); else render();
@@ -668,7 +683,15 @@ function renderBanner() {
   b.innerHTML = `<div class="banner">${status}${muted}</div>`;
 }
 
+// Many servers report every few seconds: redraw at most ~3 times a second.
+let renderTimer = null;
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, 300);
+}
+
 function render() {
+  clearTimeout(renderTimer); renderTimer = null;
   renderBanner();
   if (S.authError) { $("#view").innerHTML = ""; return; }
   if (S.view === "detail") { $("#view").innerHTML = renderDetail(); drawCharts(); }
@@ -680,7 +703,7 @@ $("#view").addEventListener("click", (ev) => {
   if (card) openServer(card.dataset.id);
 });
 window.addEventListener("resize", () => { if (S.view === "detail") drawCharts(); });
-setInterval(() => { if (!S.hover) render(); }, 5000); // keep "x ago" fresh
+setInterval(() => { if (!S.hover && !document.hidden) render(); }, 5000); // keep "x ago" fresh
 
 connect();
 </script>

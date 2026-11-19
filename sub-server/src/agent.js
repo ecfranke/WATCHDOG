@@ -12,19 +12,34 @@
 //
 //   npm start            run
 //   npm run check        print one sample and exit
+import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { Collector } from "./collect.js";
 
-const VERSION = "2.0.0";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-dotenv.config({ path: process.env.WATCHDOG_ENV_FILE || path.join(ROOT, ".env"), quiet: true });
+const VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+})();
+const ENV_FILE = process.env.WATCHDOG_ENV_FILE || path.join(ROOT, ".env");
+dotenv.config({ path: ENV_FILE, quiet: true });
 
-const MAIN = (process.env.MAIN_SERVER_URL || "").trim().replace(/\/+$/, "");
-const TOKEN = (process.env.AGENT_TOKEN || "").trim();
-const INTERVAL = Math.max(1, Number(process.env.INTERVAL_SECONDS || 5)) * 1000;
+const cleanUrl = (u) => String(u || "").trim().replace(/\/+$/, "");
+let MAIN = cleanUrl(process.env.MAIN_SERVER_URL);
+let TOKEN = (process.env.AGENT_TOKEN || "").trim();
+const intervalSec = Number(process.env.INTERVAL_SECONDS || 5);
+if (!Number.isFinite(intervalSec) || intervalSec < 1 || intervalSec > 3600) {
+  console.error(`INTERVAL_SECONDS must be a number between 1 and 3600 (got "${process.env.INTERVAL_SECONDS}")`);
+  process.exit(1);
+}
+const INTERVAL = intervalSec * 1000;
+const MAX_BACKOFF = 30_000; // while the main server is unreachable, retry at most every 30 s
 const ONCE = process.argv.includes("--once");
 const AUTO_UPDATE = !["0", "false", "no", "off"].includes(String(process.env.AUTO_UPDATE ?? "true").toLowerCase());
 
@@ -95,6 +110,27 @@ async function main() {
     console.error("Set MAIN_SERVER_URL and AGENT_TOKEN in .env (get the token from the main server: /add <name>)");
     process.exit(1);
   }
+  if (/^http:\/\//i.test(MAIN) && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(MAIN)) {
+    log("⚠ MAIN_SERVER_URL uses plain http: the token travels unencrypted. Use https:// (aaPanel SSL).");
+  }
+
+  // After a rejected token, pick up a new AGENT_TOKEN / MAIN_SERVER_URL from .env without a restart.
+  const reloadEnv = () => {
+    try {
+      const env = dotenv.parse(fs.readFileSync(ENV_FILE));
+      const token = (env.AGENT_TOKEN || "").trim();
+      const main = cleanUrl(env.MAIN_SERVER_URL);
+      if ((token && token !== TOKEN) || (main && main !== MAIN)) {
+        TOKEN = token || TOKEN;
+        MAIN = main || MAIN;
+        log("Loaded new settings from .env");
+        return true;
+      }
+    } catch {
+      /* .env not readable: keep the current settings */
+    }
+    return false;
+  };
 
   let stopping = false;
   let wake = null;
@@ -155,8 +191,15 @@ async function main() {
   while (!stopping) {
     const started = Date.now();
     let wait = INTERVAL;
+    let sample;
     try {
-      const sample = await collector.collect();
+      sample = await collector.collect();
+    } catch (e) {
+      log(`Collecting metrics failed: ${e.message}`);
+      await sleep(INTERVAL);
+      continue;
+    }
+    try {
       const res = await post("/api/agent/report", {
         ...sample, agent_version: VERSION, version: versionInfo(), interval: INTERVAL / 1000, ts: Date.now() / 1000,
       });
@@ -171,10 +214,19 @@ async function main() {
     } catch (e) {
       failures++;
       if (e.status === 401) {
-        log("The main server rejected AGENT_TOKEN (wrong or revoked). Get a new one with /token <name> and update .env");
-        wait = 60_000;
-      } else if (failures === 1 || failures % 12 === 0) {
-        log(`Cannot reach the main server (attempt ${failures}): ${e.cause?.code || e.message}`);
+        if (reloadEnv()) {
+          wait = 1000; // try the new token right away
+        } else {
+          if (failures === 1 || failures % 10 === 0) {
+            log("The main server rejected AGENT_TOKEN (wrong or revoked). Get a new one with /token <name> and put it in .env");
+          }
+          wait = 10_000; // re-check .env every 10 s, so a pasted new token is picked up quickly
+        }
+      } else {
+        if (failures === 1 || failures % 12 === 0) {
+          log(`Cannot reach the main server (attempt ${failures}): ${e.cause?.code || e.message}`);
+        }
+        wait = Math.min(MAX_BACKOFF, INTERVAL * 2 ** Math.min(failures - 1, 5));
       }
     }
     if (stopping) break;

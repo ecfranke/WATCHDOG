@@ -54,61 +54,83 @@ Create a fine-grained token with read-only *Contents* access and pass it as `UPD
 From then on, **every push to `main` is a release**. All servers pick it up within 30 minutes, or
 right away with `/update all`.
 
-## 1. Main server (behind aaPanel)
+## 1. Main server (aaPanel + nginx)
 
-Needs Node.js 18+ and git. aaPanel's nginx handles HTTPS and forwards to the Node app on a **local port you choose**.
+The main server runs behind **aaPanel's nginx**. aaPanel handles the domain and the SSL certificate (and its
+renewals), and nginx forwards HTTPS to the Node app on a **local port you choose**.
 
 ```
-Telegram / sub servers ──HTTPS 443──▶ aaPanel nginx (your domain + SSL) ──▶ 127.0.0.1:PORT (Watchdog)
+Telegram / sub servers ──HTTPS 443──▶ aaPanel nginx (domain + Let's Encrypt) ──▶ 127.0.0.1:PORT (Watchdog)
 ```
 
-**a) Get the code and run setup**
+**Step 1: in aaPanel (once)**
 
-```bash
-sudo git clone https://github.com/you/watchdog.git /opt/watchdog
-cd /opt/watchdog/main-server
-sudo npm ci --omit=dev
-sudo npm run setup
-```
-
-`npm run setup` asks for:
-- the bot token (from **@BotFather** → `/newbot`)
-- your Telegram ID(s)
-- the domain
-- the **port**: it suggests a free one and warns if the port you pick is taken
-
-It writes `.env` and `nginx/watchdog.conf`, then prints the aaPanel steps. Don't know your Telegram ID?
-Enter `0` for now, send `/start` to the bot later, and it replies with your ID. Run setup again to fill it in.
-
-**b) In aaPanel**
-
-1. **Website → Add site**: your domain (e.g. `watchdog.example.com`), PHP *static*, no database.
+1. **App Store → Nginx** is installed. For **Node.js 18+**, use *App Store → Node.js version manager* (pick v20),
+   or any system Node. The installer finds both.
+2. **Website → Add site**: your domain, e.g. `watchdog.example.com` (PHP: *static*, no database).
    Point the domain's DNS A record at this server.
-2. Open that site → **SSL** → *Let's Encrypt* → apply → turn on **Force HTTPS**.
-3. Open that site → **Config** → paste the block from `nginx/watchdog.conf` inside `server { }`, right after
-   the `#SSL-END` line → **Save**. aaPanel tests the config when you save. Use this *instead of* the
-   *Reverse proxy* tab, because the block also carries the WebSocket settings the live dashboard needs.
+3. That site → **SSL → Let's Encrypt** → apply, then turn on **Force HTTPS**.
+   Leave *Reverse proxy* and *URL rewrite* empty for this site, because Watchdog adds its own proxy config.
 
-**c) Start it**
+**Step 2: install (one command, over SSH)**
 
 ```bash
-sudo useradd -r watchdog && sudo chown -R watchdog: /opt/watchdog
-sudo cp watchdog-main.service /etc/systemd/system/ && sudo systemctl enable --now watchdog-main
-curl https://watchdog.example.com/healthz          # → {"ok":true,...}
+curl -fsSL https://raw.githubusercontent.com/you/watchdog/main/main-server/install.sh | sudo bash -s -- \
+  --repo https://github.com/you/watchdog.git
 ```
 
-**Changing the port later:** `npm run setup` (or edit `PORT` in `.env`), then `npm run nginx`, paste the new block
-into the aaPanel site config in place of the old one, and `sudo systemctl restart watchdog-main`.
+(or from a clone: `sudo bash main-server/install.sh`)
+
+It asks for the bot token (from **@BotFather** → `/newbot`), your Telegram ID, the domain and the **port**.
+It suggests a free port and warns if yours is taken. Then it:
+
+1. clones the repo to `/opt/watchdog` and installs dependencies
+2. writes `main-server/.env`
+3. creates the `watchdog` system user and the `watchdog-main` systemd service
+4. adds the proxy block to your aaPanel site config (`/www/server/panel/vhost/nginx/<domain>.conf`, right after
+   `#SSL-END`), runs `nginx -t`, and reloads nginx. **If nginx rejects it, the old config is put back.**
+5. checks `https://<domain>/healthz` through nginx
+
+You can answer the questions up front: `--domain watchdog.example.com --port 8090 --bot-token … --admin-ids 111`.
+Don't know your Telegram ID? Enter `0`, send `/start` to the bot, and it replies with your ID. Then run
+`sudo bash /opt/watchdog/main-server/install.sh --reconfigure`.
+
+**Change the port or domain later**
+
+```bash
+sudo bash /opt/watchdog/main-server/install.sh --reconfigure      # asks again
+sudo bash /opt/watchdog/main-server/install.sh --port 9090        # just the port
+```
+
+The nginx block is replaced, not duplicated, and the service restarts on the new port. Re-running the
+installer is always safe: it keeps `.env` and updates code, service and nginx.
+
+**nginx block only**
+
+```bash
+cd /opt/watchdog/main-server
+sudo npm run nginx -- --apply      # (re)write the block into the aaPanel site, test, reload
+sudo npm run nginx -- --remove     # take it out again (gives back the original aaPanel file)
+npm run nginx                      # just print it (nginx/watchdog.conf) to paste by hand
+```
+
+The block sits between `# ---- Watchdog main server` and `# ---- end Watchdog ----` in the site's config.
+Watchdog only ever touches that part, and keeps a backup next to it (`<domain>.conf.watchdog-backup`).
+aaPanel's own SSL settings live between `#SSL-START` and `#SSL-END`, so renewing or changing the
+certificate in aaPanel doesn't affect it.
+
+The installer stops with a clear message if:
+- the site doesn't exist in aaPanel yet → create it (step 1), then run the installer again
+- the site has a **Reverse proxy** in aaPanel → delete it (Watchdog's block replaces it)
+- the site's **URL rewrite** has a `location /` rule → set it to `0.default`
 
 Notes:
-- With `HOST=127.0.0.1` (the default) the port is only reachable through aaPanel's nginx, so you **don't**
-  open it in aaPanel's firewall. Sub servers only need port 443 of your domain.
-- No aaPanel? Paste the same block into any nginx `server { }` that has SSL.
-- Without a proxy at all, set `HOST=0.0.0.0`, open the port in aaPanel → Security, and use
-  `http://IP:PORT` as `PUBLIC_URL`. Monitoring works, but Telegram won't open the dashboard without HTTPS.
-- The service must run under systemd or pm2 (anything that restarts it). That's how an update takes effect.
-- Docker (`docker compose up -d --build`) publishes `PORT` on 127.0.0.1 for aaPanel to proxy to. Auto-update is
-  off there; update with `git pull && docker compose up -d --build`.
+- The app listens on `127.0.0.1:PORT`, so it's only reachable through nginx. **Don't** open the port in
+  aaPanel → Security. Sub servers only need port 443 of your domain.
+- Plain nginx without aaPanel: `sudo bash install.sh --vhost /etc/nginx/sites-enabled/watchdog.conf`
+  (a `server { }` with SSL for your domain).
+- `--no-nginx` skips the nginx step. Docker (`docker compose up -d`) also publishes on `127.0.0.1:PORT`
+  for nginx, but auto-update is off there.
 
 ## 2. Add a sub server → get its token
 
@@ -140,7 +162,8 @@ Installer options: `--github-token TOKEN` (private repo), `--branch NAME`, `--no
 `--dir PATH`. Running it again updates the install and keeps `.env`.
 
 - Logs: `journalctl -u watchdog-sub-server -f`
-- New token? Edit `/opt/watchdog/sub-server/.env`, then `sudo systemctl restart watchdog-sub-server`.
+- New token? Edit `AGENT_TOKEN` in `/opt/watchdog/sub-server/.env`. The running agent picks it up within 10 seconds,
+  no restart needed.
 - Without systemd (macOS, Windows): run it from a git clone with `pm2 start src/agent.js --name watchdog`.
 - Temperature is reported where the hardware exposes sensors (bare-metal Linux, most desktops). VMs usually have none.
 
@@ -197,6 +220,7 @@ Main server `.env`:
 | `TEMP_ALERT_CELSIUS` / `_FOR_SECONDS` | 80 / 60 | hottest sensor |
 | `ALERT_HYSTERESIS` | 5 | how far below the limit before "resolved" |
 | `AUTO_UPDATE` · `UPDATE_CHECK_MINUTES` · `UPDATE_BRANCH` · `UPDATE_GITHUB_TOKEN` | true · 30 · checked-out branch · — | |
+| `TIMEZONE` | server's own | time zone for times in Telegram messages, e.g. `America/Toronto` |
 | `PORT` | 8080 | local port of the Node app; aaPanel/nginx proxies to it (`npm run setup` picks a free one) |
 | `HOST` | 127.0.0.1 | `127.0.0.1` = only via aaPanel/nginx; `0.0.0.0` = reachable directly |
 | `DEV_NO_AUTH` | false | open `http://localhost:8080/app/` without Telegram. **Never in production.** |
@@ -204,10 +228,21 @@ Main server `.env`:
 Sub server `.env`: `MAIN_SERVER_URL`, `AGENT_TOKEN`, `INTERVAL_SECONDS` (5), plus the same `AUTO_UPDATE`,
 `UPDATE_CHECK_MINUTES`, `UPDATE_BRANCH`, `UPDATE_GITHUB_TOKEN`.
 
+## Tests
+
+```bash
+cd main-server && npm test     # login check, report sanitising, tokens, alerts, down detection,
+                               # notification batching/splitting, nginx block, HTTP + WebSocket API
+cd sub-server && npm test      # real metrics sample, caching, settings validation
+```
+
 ## Security
 
 - Each sub server has its own token. Only its SHA-256 hash is stored, and you can revoke one without touching the others.
 - The dashboard checks Telegram's signed `initData` and your user ID on every request and WebSocket.
+  The live connection sends the login as its first message, so it never appears in URLs or nginx logs.
+- Everything a sub server reports is checked and normalised on the main server (numbers stay numbers, text is
+  length-limited and escaped), so even a compromised sub server can't inject anything into the dashboard.
 - Auto-update runs whatever is pushed to the branch, so protect the branch on GitHub (who can push).
 - The sub server runs as root so it can read every process and sensor. It only reads system stats.
 
@@ -215,7 +250,8 @@ Sub server `.env`: `MAIN_SERVER_URL`, `AGENT_TOKEN`, `INTERVAL_SECONDS` (5), plu
 
 ```
 main-server/   src/ (index, server, monitor, bot, notifier, telegramAuth, store, format, config)
-               scripts/setup.js (npm run setup) · scripts/nginx.js (npm run nginx → nginx/watchdog.conf)
+               install.sh (aaPanel install) · scripts/setup.js (npm run setup)
+               scripts/nginx.js (npm run nginx [--apply|--remove] → aaPanel site config)
                public/index.html (Telegram Mini App) · .env.example · Dockerfile · watchdog-main.service
 sub-server/    src/ (agent, collect) · .env.example · install.sh · watchdog-sub-server.service
 shared/        updater.js (git-based auto-update used by both)

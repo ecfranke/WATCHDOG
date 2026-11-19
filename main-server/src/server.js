@@ -11,8 +11,8 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..",
 export function createServer(cfg, monitor, notifier, updateMain) {
   const app = express();
   app.disable("x-powered-by");
-  app.set("trust proxy", true);
-  app.use(express.json({ limit: "512kb" }));
+  app.set("trust proxy", "loopback"); // aaPanel/nginx on the same machine
+  app.use(express.json({ limit: "256kb" }));
 
   // ---------------------------------------------------------------- auth helpers
   const agentAuth = (req, res, next) => {
@@ -92,11 +92,15 @@ export function createServer(cfg, monitor, notifier, updateMain) {
   });
 
   app.post("/api/main/update", userAuth, async (req, res) => {
+    // npm ci can outlast nginx's 60 s proxy timeout: answer after 45 s at most, the update keeps going
+    const running = updateMain("dashboard");
+    const slow = new Promise((r) => setTimeout(() => r({ status: "running" }), 45_000).unref());
     try {
-      res.json(await updateMain("dashboard"));
+      res.json(await Promise.race([running, slow]));
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
+    running.catch(() => {}); // already reported, or reported via Telegram later
   });
 
   app.delete("/api/servers/:id", userAuth, (req, res) => {
@@ -109,29 +113,69 @@ export function createServer(cfg, monitor, notifier, updateMain) {
   app.get("/", (req, res) => res.redirect("/app/"));
   app.use("/app", express.static(PUBLIC_DIR, { index: "index.html", maxAge: 0 }));
 
+  // malformed JSON or other request errors: a short JSON answer instead of an HTML error page
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const status = err.status || err.statusCode || 500;
+    if (status >= 500) console.error(`${req.method} ${req.path}:`, err);
+    res.status(status).json({ error: status >= 500 ? "internal error" : err.type || err.message });
+  });
+
   // ---------------------------------------------------------------- WebSocket
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ noServer: true });
+  // Dashboard clients only ever send tiny messages.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
   const clients = new Set();
+
+  // Auth: the dashboard sends {"type":"auth","initData":…} as its first message, so the Telegram
+  // login never appears in URLs (and nginx access logs). ?initData= in the URL still works.
+  const AUTH_TIMEOUT_MS = 10_000;
+  const admit = (ws) => {
+    ws.authed = true;
+    clients.add(ws);
+    ws.send(JSON.stringify({ type: "snapshot", now: Date.now() / 1000, servers: monitor.snapshot(), config: dashboardConfig() }));
+  };
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname !== "/ws") return socket.destroy();
-    const user = checkUser(url.searchParams.get("initData"));
-    if (user.error) {
-      socket.write(`HTTP/1.1 ${user.error} Unauthorized\r\nConnection: close\r\n\r\n`);
-      return socket.destroy();
+    const fromUrl = url.searchParams.get("initData");
+    if (fromUrl) {
+      const user = checkUser(fromUrl);
+      if (user.error) {
+        socket.write(`HTTP/1.1 ${user.error} Unauthorized\r\nConnection: close\r\n\r\n`);
+        return socket.destroy();
+      }
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      clients.add(ws);
       ws.isAlive = true;
       ws.on("pong", () => (ws.isAlive = true));
-      ws.on("message", (msg) => {
-        if (String(msg) === "ping") ws.send(JSON.stringify({ type: "pong", now: Date.now() / 1000 }));
+      ws.on("close", () => {
+        clients.delete(ws);
+        clearTimeout(ws.authTimer);
       });
-      ws.on("close", () => clients.delete(ws));
       ws.on("error", () => clients.delete(ws));
-      ws.send(JSON.stringify({ type: "snapshot", now: Date.now() / 1000, servers: monitor.snapshot(), config: dashboardConfig() }));
+      ws.on("message", (msg) => {
+        const text = String(msg);
+        if (text === "ping") {
+          if (ws.authed) ws.send(JSON.stringify({ type: "pong", now: Date.now() / 1000 }));
+          return;
+        }
+        if (ws.authed) return;
+        let m;
+        try {
+          m = JSON.parse(text);
+        } catch {
+          return ws.close(4400, "bad message");
+        }
+        if (m?.type !== "auth") return ws.close(4401, "auth first");
+        const user = checkUser(String(m.initData || ""));
+        if (user.error) return ws.close(user.error === 403 ? 4403 : 4401, user.error === 403 ? "not an admin" : "invalid login");
+        clearTimeout(ws.authTimer);
+        admit(ws);
+      });
+      if (fromUrl) admit(ws);
+      else ws.authTimer = setTimeout(() => ws.authed || ws.close(4401, "auth timeout"), AUTH_TIMEOUT_MS);
     });
   });
 
@@ -147,12 +191,22 @@ export function createServer(cfg, monitor, notifier, updateMain) {
       ws.ping();
     }
   }, 30_000);
-  server.on("close", () => clearInterval(heartbeat));
+  heartbeat.unref();
 
   const broadcast = (message) => {
     const data = JSON.stringify(message);
-    for (const ws of clients) if (ws.readyState === 1) ws.send(data);
+    for (const ws of clients) if (ws.readyState === 1 && ws.bufferedAmount < 1 << 20) ws.send(data); // skip stalled clients
   };
 
-  return { server, broadcast };
+  /** Stop accepting connections and close every open one (dashboard sockets included). */
+  const close = () =>
+    new Promise((resolve) => {
+      clearInterval(heartbeat);
+      for (const ws of wss.clients) ws.terminate();
+      wss.close();
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+
+  return { server, broadcast, close };
 }

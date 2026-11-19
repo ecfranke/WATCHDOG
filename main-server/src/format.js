@@ -27,9 +27,68 @@ export function fmtBytes(n) {
   return i === 0 ? `${Math.round(n)} B` : `${n.toFixed(1)} ${units[i]}`;
 }
 
+let timeZone; // undefined = the machine's time zone
+
+/** Use this IANA time zone (e.g. "America/Toronto") for times shown in Telegram. Returns false if unknown. */
+export function setTimezone(tz) {
+  if (!tz) return true;
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: tz });
+    timeZone = tz;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function fmtClock(ts) {
   if (!ts) return "never";
-  return new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false });
+  return new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false, timeZone });
+}
+
+export function fmtDateTime(ts) {
+  if (!ts) return "never";
+  return new Date(ts * 1000).toLocaleString("en-GB", { hour12: false, timeZone, dateStyle: "medium", timeStyle: "short" });
+}
+
+export const TELEGRAM_LIMIT = 4096;
+
+/**
+ * Split a Telegram HTML message into parts under the limit, at blank lines, then at line breaks.
+ * Every formatting tag in this app opens and closes on one line, so tags are never cut in half.
+ */
+export function splitMessage(text, limit = TELEGRAM_LIMIT - 96) {
+  if (text.length <= limit) return [text];
+  const parts = [];
+  let cur = "";
+  const push = () => {
+    if (cur) parts.push(cur);
+    cur = "";
+  };
+  const add = (piece, sep) => {
+    if (!cur) cur = piece;
+    else if (cur.length + sep.length + piece.length <= limit) cur += sep + piece;
+    else {
+      push();
+      cur = piece;
+    }
+  };
+  for (const block of text.split("\n\n")) {
+    if (block.length <= limit) {
+      add(block, "\n\n");
+      continue;
+    }
+    for (const line of block.split("\n")) {
+      if (line.length <= limit) add(line, "\n");
+      else {
+        // one enormous line: drop its markup and cut it hard
+        const plain = line.replace(/<[^>]+>/g, "");
+        for (let i = 0; i < plain.length; i += limit) add(plain.slice(i, i + limit), "\n");
+      }
+    }
+  }
+  push();
+  return parts;
 }
 
 export const nameHtml = (s) => `<b>${esc(s.name)}</b>`;

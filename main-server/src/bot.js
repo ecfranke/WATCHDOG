@@ -1,6 +1,6 @@
 // Telegram bot: status, alerts, token management for sub servers, dashboard launcher.
 import { Bot, InlineKeyboard } from "grammy";
-import { esc, fmtClock, fmtDuration } from "./format.js";
+import { esc, fmtClock, fmtDateTime, fmtDuration, splitMessage, TELEGRAM_LIMIT } from "./format.js";
 
 const HTML = { parse_mode: "HTML", link_preview_options: { is_disabled: true } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -60,6 +60,15 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
     );
   };
 
+  /** Reply with a message of any length; the keyboard goes on the last part. */
+  const replyLong = async (ctx, text, extra = {}) => {
+    const parts = splitMessage(text);
+    const { reply_markup, ...rest } = extra;
+    for (let i = 0; i < parts.length; i++) {
+      await ctx.reply(parts[i], { ...HTML, ...rest, ...(i === parts.length - 1 && reply_markup ? { reply_markup } : {}) });
+    }
+  };
+
   const unknown = (ctx, q) => {
     const names = monitor.list().map((s) => esc(s.name)).join(", ") || "none yet";
     return ctx.reply(`No server called <b>${esc(q)}</b>.\nServers: ${names}`, HTML);
@@ -81,11 +90,16 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
 
   bot.command(["start", "help"], (ctx) => ctx.reply(HELP, { ...HTML, reply_markup: statusKeyboard(ctx) }));
 
-  bot.command("status", (ctx) => ctx.reply(monitor.statusText(), { ...HTML, reply_markup: statusKeyboard(ctx) }));
+  bot.command("status", (ctx) => replyLong(ctx, monitor.statusText(), { reply_markup: statusKeyboard(ctx) }));
 
   bot.callbackQuery("refresh", async (ctx) => {
+    const text = monitor.statusText();
+    if (text.length > TELEGRAM_LIMIT - 96) {
+      await ctx.answerCallbackQuery({ text: "Sending a fresh status…" }); // too long to edit in place
+      return replyLong(ctx, text, { reply_markup: statusKeyboard(ctx) });
+    }
     try {
-      await ctx.editMessageText(monitor.statusText(), { ...HTML, reply_markup: statusKeyboard(ctx) });
+      await ctx.editMessageText(text, { ...HTML, reply_markup: statusKeyboard(ctx) });
     } catch {
       /* message is not modified */
     }
@@ -103,7 +117,7 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
       const where = a.detail ? ` on ${esc(a.detail)}` : "";
       lines.push(`⚠️ <b>${esc(s.name)}</b>: ${a.label}${where} — ${Math.round(a.value)}${a.unit} (for ${fmtDuration(now - a.since)})`);
     }
-    return ctx.reply(lines.join("\n"), HTML);
+    return replyLong(ctx, lines.join("\n"));
   });
 
   bot.command("servers", (ctx) => {
@@ -114,9 +128,9 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
     for (const s of list) {
       const state = s.status === "pending" ? "never connected" : s.status === "online" ? "online" : `offline since ${fmtClock(s.statusSince)}`;
       lines.push(`${icon[s.status]} <b>${esc(s.name)}</b> <code>${esc(s.id)}</code> — ${state}`);
-      lines.push(`    token created ${new Date(s.tokenCreatedAt * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+      lines.push(`    token created ${fmtDateTime(s.tokenCreatedAt)}`);
     }
-    return ctx.reply(lines.join("\n"), HTML);
+    return replyLong(ctx, lines.join("\n"));
   });
 
   bot.command("add", async (ctx) => {
@@ -201,7 +215,7 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
       if (v?.error) lines.push(`    ❗ ${esc(v.error)}`);
     }
     if (latest) lines.push("", `Latest on GitHub: <code>${latest}</code>`);
-    return ctx.reply(lines.join("\n"), HTML);
+    return replyLong(ctx, lines.join("\n"));
   });
 
   bot.command("update", async (ctx) => {
@@ -224,15 +238,25 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
         return `Main server: ❗ ${esc(e.message)}`;
       }
     };
-    if (arg.toLowerCase() === "main") return ctx.reply(await doMain(), HTML);
+    // git fetch / npm ci can take a while: answer now, report the result in a second message
+    const mainInBackground = async () => {
+      const result = await doMain();
+      await ctx.reply(result, HTML).catch((e) => console.error("update reply failed:", e.message));
+    };
+    if (arg.toLowerCase() === "main") {
+      await ctx.reply("⬆️ Checking GitHub for a main server update…");
+      mainInBackground();
+      return;
+    }
 
     const targets = arg.toLowerCase() === "all" ? monitor.list().filter((s) => s.status !== "pending") : [monitor.find(arg)].filter(Boolean);
     if (!targets.length) return arg.toLowerCase() === "all" ? ctx.reply("No connected sub servers.") : unknown(ctx, arg);
     for (const s of targets) monitor.requestUpdate(s.id);
     const names = targets.map((s) => `<b>${esc(s.name)}</b>`).join(", ");
     let text = `⬆️ Update requested for ${names}.\nOnline servers pull it on their next report (a few seconds); offline ones when they come back. You'll get a message for each one that updates.`;
-    if (arg.toLowerCase() === "all") text += `\n\n${await doMain()}`;
-    return ctx.reply(text, HTML);
+    if (arg.toLowerCase() === "all") text += "\n\nChecking the main server too…";
+    await replyLong(ctx, text);
+    if (arg.toLowerCase() === "all") mainInBackground();
   });
 
   bot.command("dashboard", (ctx) => {
@@ -244,8 +268,9 @@ export function createBot(cfg, monitor, notifier, botOptions = {}, updateMain = 
   bot.command("mute", (ctx) => {
     const minutes = ctx.match ? parseInt(ctx.match, 10) : 60;
     if (!Number.isFinite(minutes) || minutes <= 0) return ctx.reply("Usage: /mute 60  (minutes)");
-    const until = notifier.mute(Math.min(minutes, 60 * 24 * 7));
-    return ctx.reply(`🔕 Notifications muted for ${fmtDuration(minutes * 60)} (until ${fmtClock(until)}).`);
+    const capped = Math.min(minutes, 60 * 24 * 7);
+    const until = notifier.mute(capped);
+    return ctx.reply(`🔕 Notifications muted for ${fmtDuration(capped * 60)} (until ${fmtDateTime(until)}).`);
   });
 
   bot.command("unmute", (ctx) => {

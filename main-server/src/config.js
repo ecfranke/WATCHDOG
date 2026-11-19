@@ -1,7 +1,10 @@
 // Main server configuration, read from .env
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 
-dotenv.config({ path: process.env.WATCHDOG_ENV_FILE || ".env", quiet: true });
+const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: process.env.WATCHDOG_ENV_FILE || path.join(APP_DIR, ".env"), quiet: true });
 
 const str = (name, def = "") => (process.env[name] ?? def).toString().trim();
 const num = (name, def) => {
@@ -45,7 +48,9 @@ export function loadConfig() {
     // 127.0.0.1 = only reachable through aaPanel/nginx on the same machine (recommended)
     host: str("HOST", "127.0.0.1"),
     port: num("PORT", 8080),
-    dataFile: str("DATA_FILE", "data/watchdog.json"),
+    // relative paths are relative to the main-server folder, wherever it is started from
+    dataFile: path.resolve(APP_DIR, str("DATA_FILE", "data/watchdog.json")),
+    timezone: str("TIMEZONE"), // e.g. America/Toronto; empty = the machine's time zone
 
     offlineAfter: num("OFFLINE_AFTER_SECONDS", 30),
     historyMinutes: num("HISTORY_MINUTES", 60),
@@ -76,6 +81,12 @@ export function loadConfig() {
   if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) problems.push(`PORT must be 1-65535 (got ${cfg.port})`);
   if (!cfg.botToken) problems.push("BOT_TOKEN is not set (get one from @BotFather)");
   if (!cfg.adminIds.length) problems.push("ADMIN_IDS is empty (send /start to your bot to see your Telegram ID)");
+  if (!(cfg.offlineAfter >= 10)) problems.push(`OFFLINE_AFTER_SECONDS must be at least 10 (got ${cfg.offlineAfter})`);
+  if (!(cfg.historyMinutes >= 1 && cfg.historyMinutes <= 1440)) problems.push("HISTORY_MINUTES must be between 1 and 1440");
+  if (!(cfg.hysteresis >= 0)) problems.push("ALERT_HYSTERESIS must be 0 or more");
+  for (const k of ["cpuAlertFor", "ramAlertFor", "diskAlertFor", "tempAlertFor", "reportIntervalMinutes"]) {
+    if (!(cfg[k] >= 0)) problems.push(`${k} must be 0 or more`);
+  }
   if (problems.length) {
     console.error("Watchdog config error:\n  - " + problems.join("\n  - "));
     process.exit(1);

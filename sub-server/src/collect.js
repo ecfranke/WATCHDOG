@@ -6,6 +6,7 @@ const SKIP_FS = new Set(["squashfs", "tmpfs", "devtmpfs", "overlay", "iso9660", 
 const SKIP_MOUNT = /^(\/snap|\/boot\/efi|\/var\/lib\/docker|\/run|\/sys|\/proc|\/dev|\/System\/Volumes\/(VM|Preboot|Update|xarts|iSCPreboot|Hardware))/;
 const SKIP_NIC = /^(lo|veth|docker|br-|virbr|cni|flannel|cali|tun|utun|awdl|llw|anpi|ap\d|bridge)/i;
 const PROCESS_EVERY_MS = 15_000; // process list is the expensive part
+const DISKS_EVERY_MS = 30_000; // disk usage changes slowly; `df` needn't run every few seconds
 const round1 = (n) => (n === null || n === undefined || Number.isNaN(n) ? null : Math.round(n * 10) / 10);
 const valid = (t) => typeof t === "number" && t > 0 && t < 150;
 
@@ -49,6 +50,8 @@ export class Collector {
   }
 
   async disks() {
+    const now = Date.now();
+    if (this.diskCache && now - this.diskAt < DISKS_EVERY_MS) return this.diskCache;
     const out = [];
     const seen = new Set();
     for (const d of await si.fsSize().catch(() => [])) {
@@ -57,6 +60,8 @@ export class Collector {
       seen.add(d.fs);
       out.push({ mount: d.mount, device: d.fs, fstype: d.type, total: d.size, used: d.used, percent: round1(d.use) });
     }
+    this.diskCache = out;
+    this.diskAt = now;
     return out;
   }
 

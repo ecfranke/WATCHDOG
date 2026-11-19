@@ -2,8 +2,10 @@
 // Interactive setup for the main server: writes .env and the nginx config for aaPanel.
 //
 //   npm run setup
+//   npm run setup -- --domain watchdog.example.com --port 8090 --bot-token 123:AA… --admin-ids 111 --yes
 //
 // Re-run any time to change the port, domain or bot settings; current values are the defaults.
+// Flags answer a question without asking; --yes accepts the default for everything else.
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -30,7 +32,28 @@ rl.on("close", () => {
 const nextLine = () =>
   lines.length ? Promise.resolve(lines.shift()) : ended ? Promise.resolve(null) : new Promise((r) => (waiting = r));
 
-async function ask(question, def = "", validate = () => null) {
+const flag = (name) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i > 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith("--") ? process.argv[i + 1] : undefined;
+};
+const YES = process.argv.includes("--yes");
+const FROM_INSTALLER = process.argv.includes("--from-installer");
+
+async function ask(question, def = "", validate = () => null, preset = undefined) {
+  if (preset !== undefined || (YES && def !== "")) {
+    const answer = String(preset ?? def).trim();
+    const problem = validate(answer);
+    if (problem) {
+      console.error(`✖ ${question}: ${problem}`);
+      process.exit(1);
+    }
+    console.log(`${question}: ${answer}`);
+    return answer;
+  }
+  if (YES) {
+    console.error(`✖ ${question}: no value (pass it as a flag)`);
+    process.exit(1);
+  }
   for (;;) {
     const shown = def ? ` [${def}]` : "";
     process.stdout.write(`${question}${shown}: `);
@@ -80,29 +103,49 @@ console.log("\n🐕 Watchdog main server setup\n");
 
 const botToken = await ask("Telegram bot token (from @BotFather)", current.BOT_TOKEN || "", (v) =>
   /^\d+:[\w-]{30,}$/.test(v) ? null : "looks wrong — it should look like 123456789:AA…",
+  flag("bot-token"),
 );
 const adminIds = await ask("Admin Telegram user IDs (comma separated; unknown? use 0 and send /start to the bot later)", current.ADMIN_IDS || "", (v) =>
   /^\s*-?\d+(\s*[,;\s]\s*-?\d+)*\s*$/.test(v) ? null : "numbers only, e.g. 111111111,222222222",
+  flag("admin-ids"),
 );
 
 const domainIn = await ask(
   "Domain of this main server, as set up in aaPanel (e.g. watchdog.example.com)",
   hostFromUrl(current.PUBLIC_URL || ""),
   (v) => (v && !/\s/.test(v) ? null : "enter a domain like watchdog.example.com"),
+  flag("domain"),
 );
 
-const behindProxy = /^y/i.test(await ask("Is aaPanel / nginx in front of it (recommended)? y/n", "y"));
+const timezone = await ask(
+  "Time zone for times in Telegram messages (e.g. America/Toronto)",
+  current.TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  (v) => {
+    try {
+      new Intl.DateTimeFormat("en-GB", { timeZone: v });
+      return null;
+    } catch {
+      return "unknown time zone — use a name like America/Toronto or Europe/London";
+    }
+  },
+  flag("timezone"),
+);
+
+const behindProxy = /^y/i.test(
+  await ask("Is aaPanel / nginx in front of it (recommended)? y/n", "y", () => null, process.argv.includes("--direct") ? "n" : undefined),
+);
 const host = behindProxy ? "127.0.0.1" : "0.0.0.0";
 
+// Keep an already-configured port (it is "in use" when Watchdog itself is running); for a new setup, suggest a free one.
 const curPort = Number(current.PORT || 8080);
-const suggested = (await portFree(curPort, host)) ? curPort : await nextFreePort(curPort + 1, host);
+const suggested = current.PORT || (await portFree(curPort, host)) ? curPort : await nextFreePort(curPort + 1, host);
 if (suggested !== curPort) console.log(`  Port ${curPort} is in use on this machine; suggesting ${suggested}.`);
 const port = Number(
   await ask("Local port for the Node app (any free port; aaPanel forwards HTTPS to it)", String(suggested || 8080), (v) => {
     const n = Number(v);
     if (!Number.isInteger(n) || n < 1024 || n > 65535) return "pick a number between 1024 and 65535";
     return null;
-  }),
+  }, flag("port")),
 );
 if (!(await portFree(port, host))) {
   console.log(`  ⚠ Port ${port} is in use right now. Fine if that's a running Watchdog you're reconfiguring; otherwise pick another.`);
@@ -122,6 +165,7 @@ for (const [k, v] of Object.entries({
   WEBAPP_URL: `${publicUrl}/app/`,
   HOST: host,
   PORT: port,
+  TIMEZONE: timezone,
 })) text = setKey(text, k, v);
 fs.writeFileSync(ENV_FILE, text, { mode: 0o600 });
 
@@ -130,6 +174,10 @@ const conf = buildNginx({ port, publicUrl });
 const confFile = writeNginxFile(conf);
 
 const domain = hostFromUrl(publicUrl);
+if (FROM_INSTALLER) {
+  console.log(`\n✅ Saved .env  (PORT=${port}, HOST=${host}, PUBLIC_URL=${publicUrl})`);
+  process.exit(0);
+}
 console.log(`
 ✅ Saved ${path.relative(process.cwd(), ENV_FILE) || ".env"}  (PORT=${port}, HOST=${host}, PUBLIC_URL=${publicUrl})
 ✅ Saved ${path.relative(process.cwd(), confFile)}
@@ -139,8 +187,8 @@ ${
 Next, in aaPanel:
   1. Website → Add site → domain: ${domain}  (PHP: static, no database)
   2. That site → SSL → Let's Encrypt → apply, then turn on "Force HTTPS"
-  3. That site → Config → paste the block below inside server { }, right after the line "#SSL-END" → Save
-     (aaPanel tests the config when you save; don't also add a "Reverse proxy" for this site)
+  3. Put the proxy into that site:  sudo npm run nginx -- --apply
+     (or paste the block below into the site's Config, right after "#SSL-END"; don't also add a "Reverse proxy")
 
 ${conf}
   4. Start the main server:  sudo systemctl restart watchdog-main   (or: npm start)

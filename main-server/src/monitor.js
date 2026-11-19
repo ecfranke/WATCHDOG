@@ -2,6 +2,7 @@
 // threshold alerts with hysteresis, live history for charts, periodic health reports.
 import crypto from "node:crypto";
 import { esc, fmtClock, fmtDuration, metricsLine, nameHtml, statusMessage, worstDisk } from "./format.js";
+import { sanitizeReport, sanitizeVersion } from "./sanitize.js";
 
 /** Builds a raw.githubusercontent.com URL for a file in a public GitHub repo. */
 function rawGithubUrl(remote, branch, file) {
@@ -11,6 +12,8 @@ function rawGithubUrl(remote, branch, file) {
 
 const REBOOT_TOLERANCE = 60; // seconds of boot-time drift ignored (NTP adjustments)
 const HISTORY_CAP = 5000;
+const ROUTINE_SAVE_MS = 60_000; // metrics-only changes are written at most once a minute
+const WATCH_EVERY_MS = 5000;
 const nowSec = () => Date.now() / 1000;
 
 export const hashToken = (token) => crypto.createHash("sha256").update(String(token)).digest("hex");
@@ -68,6 +71,9 @@ export class Monitor {
 
     for (const s of Object.values(store.servers)) {
       if (s.tokenHash) this.byToken.set(s.tokenHash, s.id);
+      // data saved by older versions went in unchecked
+      if (s.payload) s.payload = sanitizeReport(s.payload);
+      if (s.version) s.version = sanitizeVersion(s.version);
     }
     console.log(`Loaded ${Object.keys(store.servers).length} server(s)`);
   }
@@ -84,13 +90,13 @@ export class Monitor {
   }
 
   get(id) {
-    return this.store.servers[id] || null;
+    return typeof id === "string" && Object.hasOwn(this.store.servers, id) ? this.store.servers[id] : null;
   }
 
   find(query) {
     const q = String(query || "").trim().toLowerCase();
     if (!q) return null;
-    return this.store.servers[q] || this.list().find((s) => s.name.toLowerCase() === q) || null;
+    return this.get(q) || this.list().find((s) => s.name.toLowerCase() === q) || null;
   }
 
   envSnippet(token) {
@@ -127,7 +133,7 @@ export class Monitor {
       throw new Error(`A server called "${name}" already exists`);
     }
     let id = slugify(name);
-    for (let i = 2; this.store.servers[id]; i++) id = `${slugify(name)}-${i}`;
+    for (let i = 2; this.get(id); i++) id = `${slugify(name)}-${i}`;
     const token = newToken();
     const s = {
       id, name, tokenHash: hashToken(token), tokenCreatedAt: nowSec(), createdAt: nowSec(),
@@ -220,12 +226,13 @@ export class Monitor {
 
   // ------------------------------------------------------------------ agent events
 
-  handleReport(s, payload) {
+  handleReport(s, raw) {
     const now = nowSec();
+    const payload = sanitizeReport(raw);
     const prevStatus = s.status;
     const prevSince = s.statusSince;
     const prevBoot = s.bootTime;
-    const boot = Number(payload.boot_time) || null;
+    const boot = payload.boot_time || null;
     const rebooted = Boolean(prevBoot && boot && Math.abs(boot - prevBoot) > REBOOT_TOLERANCE);
 
     s.payload = payload;
@@ -253,18 +260,21 @@ export class Monitor {
       s.offlineReason = null;
     }
 
-    this.trackVersion(s, payload.version);
+    const versionChanged = this.trackVersion(s, sanitizeVersion(raw?.version));
     const update = Boolean(s.pendingUpdate);
     s.pendingUpdate = false;
 
-    this.evaluateAlerts(s, now);
-    this.store.save();
+    const alertsChanged = this.evaluateAlerts(s, now);
+    // status/version/flag changes are saved right away; plain metrics at most once a minute
+    const important = prevStatus !== "online" || rebooted || versionChanged || update || alertsChanged;
+    this.store.save(important ? 1000 : ROUTINE_SAVE_MS);
     this.broadcast({ type: "update", server: this.summary(s), point: rt.history[rt.history.length - 1] });
     return { update };
   }
 
+  /** @returns {boolean} whether anything worth saving changed */
   trackVersion(s, v) {
-    if (!v || typeof v !== "object") return;
+    if (!v) return false;
     const prev = s.version || {};
     if (prev.commit && v.commit && prev.commit !== v.commit) {
       this.notify(`⬆️ ${nameHtml(s)} updated <code>${esc(prev.commit)}</code> → <code>${esc(v.commit)}</code>`);
@@ -272,10 +282,13 @@ export class Monitor {
     if (v.error && v.error !== prev.error) {
       this.notify(`❗ ${nameHtml(s)}: update failed\n${esc(v.error)}`, true);
     }
-    s.version = {
-      commit: v.commit || null, branch: v.branch || null, enabled: Boolean(v.enabled), auto: Boolean(v.auto),
-      reason: v.reason || null, error: v.error || null, app: v.app || null, pending_restart: Boolean(v.pending_restart),
+    const next = {
+      commit: v.commit, branch: v.branch, enabled: v.enabled, auto: v.auto,
+      reason: v.reason, error: v.error, app: v.app, pending_restart: v.pending_restart,
     };
+    const changed = JSON.stringify(next) !== JSON.stringify(s.version || null);
+    s.version = next;
+    return changed;
   }
 
   handleGoodbye(s, reason) {
@@ -296,6 +309,13 @@ export class Monitor {
 
   checkOffline() {
     const now = nowSec();
+    // If this process itself was paused (machine asleep, VM frozen, event loop blocked), nobody's
+    // reports could arrive: restart the grace period instead of declaring every server down.
+    if (this.lastTick && now - this.lastTick > (3 * WATCH_EVERY_MS) / 1000) {
+      console.warn(`Main server was paused for ${Math.round(now - this.lastTick)}s; resetting the down timers`);
+      this.startedAt = now;
+    }
+    this.lastTick = now;
     for (const s of this.list()) {
       if (s.status !== "online") continue;
       // after a main-server restart, give every sub server a fresh grace period
@@ -315,8 +335,10 @@ export class Monitor {
     }
   }
 
+  /** @returns {boolean} whether an alert started or ended */
   evaluateAlerts(s, now) {
     const alerts = this.rt(s.id).alerts;
+    let changed = false;
     for (const rule of this.rules) {
       const [value, detail] = rule.measure(s.payload || {});
       const st = (alerts[rule.key] ||= { label: rule.label, unit: rule.unit, active: false, breachSince: null });
@@ -329,6 +351,7 @@ export class Monitor {
         if (!st.active && now - st.breachSince >= rule.duration) {
           st.active = true;
           st.since = now;
+          changed = true;
           const held = rule.duration ? ` for ${fmtDuration(now - st.breachSince)}` : "";
           this.notify(
             `⚠️ ${nameHtml(s)}: <b>${rule.label}</b>${where}\n` +
@@ -342,6 +365,7 @@ export class Monitor {
           const lasted = fmtDuration(now - (st.since || now));
           st.active = false;
           st.since = null;
+          changed = true;
           this.notify(
             `✅ ${nameHtml(s)}: ${rule.label.toLowerCase()} resolved${where}\nNow ${Math.round(value)}${rule.unit} (lasted ${lasted})`,
           );
@@ -350,6 +374,7 @@ export class Monitor {
         st.breachSince = null; // inside the hysteresis band: restart the clock
       }
     }
+    return changed;
   }
 
   // ------------------------------------------------------------------ timers
@@ -361,7 +386,7 @@ export class Monitor {
       } catch (e) {
         console.error("offline check failed:", e);
       }
-    }, 5000);
+    }, WATCH_EVERY_MS);
 
     const interval = this.cfg.reportIntervalMinutes * 60;
     if (interval > 0) {

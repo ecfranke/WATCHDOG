@@ -5,14 +5,15 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/watchdog/main-server
-ExecStart=/usr/bin/node /opt/watchdog/main-server/src/index.js
+WorkingDirectory=@APP@
+ExecStart=@NODE@ @APP@/src/index.js
+# Always restart: this is also how a downloaded update gets applied.
 Restart=always
-# (Restart=always is also how a downloaded update gets applied)
-RestartSec=5
-User=watchdog
-Group=watchdog
+RestartSec=3
+User=@USER@
+Group=@USER@
 Environment=NODE_ENV=production
+Environment=PATH=@NODE_DIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
 WantedBy=multi-user.target
